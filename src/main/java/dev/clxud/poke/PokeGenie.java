@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.clxud.poke.guard.CommandGuard;
+import dev.clxud.poke.guard.PrivacyGuard;
 import dev.clxud.poke.inspect.PlayerInspector;
 import dev.clxud.poke.memory.PlayerMemory;
 import dev.clxud.poke.memory.PlayerProfile;
@@ -33,6 +34,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -70,6 +72,7 @@ public final class PokeGenie {
     // wishes wait in {@code queue} behind the {@code activeKey} holder.
     private final boolean serialize;
     private final BooleanSupplier linkReady;
+    private final Supplier<Set<String>> privacyTokens;
     private final WishHud hud;
     private final Deque<QueuedWish> queue = new ArrayDeque<>();
     private final Object lock = new Object();
@@ -80,7 +83,8 @@ public final class PokeGenie {
 
     public PokeGenie(Plugin plugin, PokeSender poke, RconClient rcon, CommandGuard guard, PlayerMemory memory,
                      StatsReader stats, PlayerInspector inspector, String displayName, int wishTimeoutSeconds,
-                     boolean serialize, BooleanSupplier linkReady, Logger logger) {
+                     boolean serialize, BooleanSupplier linkReady, Supplier<Set<String>> privacyTokens,
+                     Logger logger) {
         this.plugin = plugin;
         this.poke = poke;
         this.rcon = rcon;
@@ -91,6 +95,7 @@ public final class PokeGenie {
         this.wishTimeoutMillis = wishTimeoutSeconds * 1000L;
         this.serialize = serialize;
         this.linkReady = linkReady;
+        this.privacyTokens = privacyTokens;
         this.hud = new WishHud(plugin);
         this.logger = logger;
         this.prefix = Component.text(displayName, NamedTextColor.GREEN)
@@ -521,8 +526,9 @@ public final class PokeGenie {
         if (clean.isBlank()) {
             clean = "As you wish... or perhaps not.";
         }
+        clean = PrivacyGuard.redact(clean, privacyTokens.get());
         logger.info("Poke reply -> " + name + ": " + clean);
-        speakByName(name, clean);
+        broadcastReply(name, clean);
         playSound(name, Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.5f);
 
         if (p != null) {
@@ -551,8 +557,9 @@ public final class PokeGenie {
         PendingWish p = latest.get();
         String clean = ChatSanitizer.clean(text);
         if (clean.isBlank()) clean = "As you wish... or perhaps not.";
+        clean = PrivacyGuard.redact(clean, privacyTokens.get());
         logger.info("Telegram reply for " + p.name + ": " + clean);
-        speakByName(p.name, clean);
+        broadcastReply(p.name, clean);
         playSound(p.name, Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.5f);
         p.replied = true;
         commit(p, clean);
@@ -601,6 +608,7 @@ public final class PokeGenie {
 
     private String wishMessage(String playerName, String wish, PlayerProfile profile) {
         return "[Minecraft server genie]\n"
+                + PrivacyGuard.directive() + "\n\n"
                 + "You are the resident genie/admin of a Minecraft (Paper 1.21.11) server, and you are "
                 + "free to act with your own personality. A player named \"" + playerName + "\" just made a "
                 + "wish in the in-game chat.\n\n"
@@ -702,6 +710,18 @@ public final class PokeGenie {
                 p.sendMessage(prefix.append(Component.text(text, NamedTextColor.WHITE)));
             }
         });
+    }
+
+    /**
+     * Shows Poke's reply to the whole server so everyone sees how it reacts, with
+     * the target player called out like a mention (their IGN in the accent color).
+     */
+    private void broadcastReply(String targetName, String text) {
+        String who = (targetName == null || targetName.isBlank()) ? "a player" : targetName;
+        Component message = prefix
+                .append(Component.text("@" + who, NamedTextColor.GREEN))
+                .append(Component.text(" " + text, NamedTextColor.WHITE));
+        Bukkit.getScheduler().runTask(plugin, () -> Bukkit.broadcast(message));
     }
 
     private void playSound(String name, Sound sound, float volume, float pitch) {

@@ -18,6 +18,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -67,6 +68,9 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
 
     private final ConcurrentHashMap<String, CompletableFuture<JsonObject>> pending = new ConcurrentHashMap<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
+    // The linked account's own identifiers (name/handle/phone), fetched on link,
+    // so the genie can scrub them from anything Poke says back. See PrivacyGuard.
+    private final Set<String> privacyTokens = ConcurrentHashMap.newKeySet();
 
     private volatile String authorizationState = "unknown";
     private volatile long botChatId;
@@ -261,6 +265,7 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
         Thread t = new Thread(() -> {
             try {
                 resolveBotChat();
+                fetchSelfIdentity();
                 logger.info("Telegram bridge ready. Bot chat id = " + botChatId + " for @" + botUsername);
             } catch (Exception e) {
                 logger.warning("Telegram linked but could not resolve @" + botUsername + ": " + e.getMessage());
@@ -268,6 +273,43 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
         }, "PokeMC-TelegramResolve");
         t.setDaemon(true);
         t.start();
+    }
+
+    /** The linked account's own identifiers, for {@code PrivacyGuard} to scrub from replies. */
+    public Set<String> privacyTokens() {
+        return privacyTokens;
+    }
+
+    /** Pulls the logged-in account's own name/handle/phone so we can redact them later. */
+    private void fetchSelfIdentity() {
+        addPrivacyToken(phoneNumber);
+        try {
+            JsonObject me = request(requestOf("getMe").build(), REQUEST_TIMEOUT);
+            addPrivacyToken(optString(me, "first_name"));
+            addPrivacyToken(optString(me, "last_name"));
+            String phone = optString(me, "phone_number");
+            addPrivacyToken(phone);
+            if (!phone.isBlank()) {
+                addPrivacyToken("+" + phone);
+            }
+            if (me.has("usernames") && me.get("usernames").isJsonObject()) {
+                JsonObject usernames = me.getAsJsonObject("usernames");
+                addPrivacyToken(optString(usernames, "editable_username"));
+                if (usernames.has("active_usernames") && usernames.get("active_usernames").isJsonArray()) {
+                    usernames.getAsJsonArray("active_usernames")
+                            .forEach(el -> addPrivacyToken(el.getAsString()));
+                }
+            }
+            addPrivacyToken(optString(me, "username")); // legacy single-username field
+        } catch (Exception e) {
+            logger.fine("Could not fetch self identity for the privacy guard: " + e.getMessage());
+        }
+    }
+
+    private void addPrivacyToken(String value) {
+        if (value != null && !value.isBlank()) {
+            privacyTokens.add(value.trim());
+        }
     }
 
     // ---- interactive linking (driven by /poke link|code|password) ----------

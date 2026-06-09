@@ -175,6 +175,7 @@ public final class PokePlugin extends JavaPlugin {
                 config.getInt("poke.wish-timeout-seconds", 300),
                 telegramEnabled,
                 () -> bridge != null && bridge.isLinked(),
+                () -> bridge != null ? bridge.privacyTokens() : Set.of(),
                 getLogger());
         genieRef.set(genie);
 
