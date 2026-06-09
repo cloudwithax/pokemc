@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -49,6 +50,8 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(20);
     private static final String RUNTIME_VERSION = "linux-x86_64-v1";
     private static final String TDJSON_SONAME = "libtdjson.so.1.8.64";
+    // E.164: a leading +, a non-zero country-code digit, then up to 14 more digits.
+    private static final Pattern E164 = Pattern.compile("\\+[1-9]\\d{1,14}");
 
     private final Path dataFolder;
     private final Path phoneFile;
@@ -319,7 +322,13 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
         if (phone == null || phone.isBlank()) {
             return "Usage: /poke link <+phone>  (E.164, e.g. +15551234567)";
         }
-        this.phoneNumber = phone.trim();
+        // Tolerate common separators, then require strict E.164 — otherwise no-op.
+        String normalized = phone.trim().replaceAll("[\\s().-]", "");
+        if (!E164.matcher(normalized).matches()) {
+            return "That isn't a valid international number. Use E.164 format — a + and country "
+                    + "code followed by digits, e.g. /poke link +15551234567.";
+        }
+        this.phoneNumber = normalized;
         persistPhone(this.phoneNumber);
         if (!running.get()) {
             return "Telegram bridge is not running.";
