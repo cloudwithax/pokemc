@@ -317,21 +317,21 @@ public void onDisable() {
             return false;
         }
         if (args.length == 0) {
-            sender.sendMessage(ChatColor.GOLD + "PokeMC " + ChatColor.GRAY + "v" + getPluginMeta().getVersion()
+            sender.sendMessage(ChatColor.GREEN + "PokeMC " + ChatColor.GRAY + "v" + getPluginMeta().getVersion()
                     + " — usage: /poke <status|retry|reload|link|code|password>");
             return true;
         }
         switch (args[0].toLowerCase()) {
             case "status" -> {
                 boolean ready = genie != null && genie.isReady();
-                sender.sendMessage(ChatColor.GOLD + "PokeMC " + ChatColor.GRAY + "— genie "
+                sender.sendMessage(ChatColor.GREEN + "PokeMC " + ChatColor.GRAY + "— genie "
                         + (ready ? ChatColor.GREEN + "AWAKE" : ChatColor.RED + "DORMANT")
                         + ChatColor.GRAY + ", MCP on port " + mcpPort
                         + ", wishes in flight: " + (genie == null ? "n/a" : genie.pendingCount())
                         + ", queued: " + (genie == null ? "n/a" : genie.queuedCount()));
                 if (telegram != null) {
                     boolean linked = telegram.isLinked();
-                    sender.sendMessage(ChatColor.GOLD + "Telegram " + ChatColor.GRAY + "@"
+                    sender.sendMessage(ChatColor.GREEN + "Telegram " + ChatColor.GRAY + "@"
                             + telegram.getBotUsername() + " — "
                             + (linked ? ChatColor.GREEN + "LINKED" : ChatColor.YELLOW + telegram.friendlyState()));
                 }
@@ -340,28 +340,28 @@ public void onDisable() {
                 if (telegram == null) {
                     sender.sendMessage(ChatColor.RED + "Telegram bridge is not enabled (telegram.enabled: false).");
                 } else {
-                    sender.sendMessage(ChatColor.GOLD + telegram.submitPhone(args.length > 1 ? args[1] : null));
+                    sender.sendMessage(ChatColor.GREEN + telegram.submitPhone(args.length > 1 ? args[1] : null));
                 }
             }
             case "code" -> {
                 if (telegram == null) {
                     sender.sendMessage(ChatColor.RED + "Telegram bridge is not enabled (telegram.enabled: false).");
                 } else {
-                    sender.sendMessage(ChatColor.GOLD + telegram.submitCode(args.length > 1 ? args[1] : null));
+                    sender.sendMessage(ChatColor.GREEN + telegram.submitCode(args.length > 1 ? args[1] : null));
                 }
             }
             case "password" -> {
                 if (telegram == null) {
                     sender.sendMessage(ChatColor.RED + "Telegram bridge is not enabled (telegram.enabled: false).");
                 } else {
-                    sender.sendMessage(ChatColor.GOLD + telegram.submitPassword(args.length > 1 ? args[1] : null));
+                    sender.sendMessage(ChatColor.GREEN + telegram.submitPassword(args.length > 1 ? args[1] : null));
                 }
             }
             case "retry" -> {
                 if (genie == null) {
                     sender.sendMessage(ChatColor.RED + "PokeMC is not set up.");
                 } else {
-                    sender.sendMessage(ChatColor.GOLD + "Re-running the Poke connection self-test...");
+                    sender.sendMessage(ChatColor.GREEN + "Re-running the Poke connection self-test...");
                     startProbe();
                 }
             }

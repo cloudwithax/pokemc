@@ -50,13 +50,13 @@ public final class ChatListener implements Listener {
         String wish = remainder.replaceFirst("^[\\s,:!]+", "").trim();
         if (wish.isEmpty()) {
             player.sendMessage(Component.text("Poke » Speak your wish, mortal. \"poke <what you want>\".",
-                    NamedTextColor.GOLD));
+                    NamedTextColor.GREEN));
             return;
         }
 
         if (!genie.isReady()) {
             player.sendMessage(Component.text("Poke » The genie slumbers — its link to the beyond is not open. "
-                    + "An admin must check the connection.", NamedTextColor.GOLD));
+                    + "An admin must check the connection.", NamedTextColor.GREEN));
             return;
         }
 

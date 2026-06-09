@@ -3,7 +3,6 @@ package dev.clxud.poke;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -75,7 +74,7 @@ final class WishHud {
             Throb t = bars.get(uuid);
             if (t == null) {
                 BossBar bar = BossBar.bossBar(Component.empty(), 0f,
-                        BossBar.Color.PURPLE, BossBar.Overlay.NOTCHED_20);
+                        BossBar.Color.GREEN, BossBar.Overlay.NOTCHED_20);
                 t = new Throb(bar);
                 bars.put(uuid, t);
                 Player p = Bukkit.getPlayer(uuid);
@@ -110,12 +109,12 @@ final class WishHud {
             progress = p < 10 ? p / 10f : (20 - p) / 10f;
         }
         t.bar.progress(Math.max(0f, Math.min(1f, progress)));
-        t.bar.color(queued ? BossBar.Color.BLUE : BossBar.Color.PURPLE);
+        t.bar.color(BossBar.Color.GREEN);
 
         Component tail = Component.text(t.label + (queued ? " — #" + t.position + " in line" : "..."),
                 NamedTextColor.GRAY);
-        Component name = Component.text(spin + " ", queued ? NamedTextColor.AQUA : NamedTextColor.LIGHT_PURPLE)
-                .append(Component.text("Poke", NamedTextColor.GOLD, TextDecoration.BOLD))
+        Component name = Component.text(spin + " ", NamedTextColor.GREEN)
+                .append(Component.text("Poke", NamedTextColor.GREEN))
                 .append(Component.text(" » ", NamedTextColor.DARK_GRAY))
                 .append(tail);
         t.bar.name(name);

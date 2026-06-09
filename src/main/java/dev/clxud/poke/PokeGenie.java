@@ -14,7 +14,6 @@ import dev.clxud.poke.stats.StatsSnapshot;
 import dev.clxud.poke.util.ChatSanitizer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -93,7 +92,7 @@ public final class PokeGenie {
         this.linkReady = linkReady;
         this.hud = new WishHud(plugin);
         this.logger = logger;
-        this.prefix = Component.text(displayName, NamedTextColor.GOLD, TextDecoration.BOLD)
+        this.prefix = Component.text(displayName, NamedTextColor.GREEN)
                 .append(Component.text(" » ", NamedTextColor.DARK_GRAY));
     }
 
@@ -533,29 +532,27 @@ public final class PokeGenie {
 
     /**
      * Handles a reply received from the Telegram bridge (from @interaction_poke_bot).
-     * Matches it to the most recent pending wish and delivers it in-game.
+     * Acts only as a fallback: Poke normally delivers its reply through the
+     * {@code reply_to_player} tool, which finishes the wish first. If that
+     * already happened there is no pending wish left and the DM echo is dropped.
      */
     public void handleTelegramReply(String text) {
         if (text == null || text.isBlank()) return;
-        // Find the most recent pending wish (there should typically be only one)
         Optional<PendingWish> latest = pending.values().stream()
                 .max(Comparator.comparingLong(p -> p.submittedAt));
-        if (latest.isPresent()) {
-            PendingWish p = latest.get();
-            String clean = ChatSanitizer.clean(text);
-            if (clean.isBlank()) clean = "As you wish... or perhaps not.";
-            logger.info("Telegram reply for " + p.name + ": " + clean);
-            speakByName(p.name, clean);
-            p.replied = true;
-            commit(p, clean);
-            completeActive(p);
-        } else {
-            // No pending wish — broadcast to all online ops as fallback
-            logger.warning("Telegram reply received but no pending wish; broadcasting to ops.");
-            Bukkit.getOnlinePlayers().stream()
-                    .filter(Player::isOp)
-                    .forEach(op -> speak(op, "[Telegram] " + text));
+        if (latest.isEmpty()) {
+            // Poke already replied via reply_to_player; nothing to deliver.
+            logger.fine("Telegram DM reply with no pending wish (already handled by reply_to_player).");
+            return;
         }
+        PendingWish p = latest.get();
+        String clean = ChatSanitizer.clean(text);
+        if (clean.isBlank()) clean = "As you wish... or perhaps not.";
+        logger.info("Telegram reply for " + p.name + ": " + clean);
+        speakByName(p.name, clean);
+        p.replied = true;
+        commit(p, clean);
+        completeActive(p);
     }
 
     // ---- memory commit -----------------------------------------------------
