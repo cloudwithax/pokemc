@@ -97,8 +97,9 @@ Tell Poke where your server is (use **your** URL, and keep the `/sse` on the end
 npx poke@latest mcp add https://something-random.trycloudflare.com/sse -n minecraft
 ```
 
-> If it asks for a secret key, it's auto‑generated and saved at
-> `plugins/PokeMC/mcp-api-key.txt` — copy it from there.
+> If it asks for a secret key: on first start PokeMC generates one, writes it
+> into `plugins/PokeMC/config.yml` (`mcp.api-key`), and prints it in the server
+> console — copy it from either place.
 
 ### 5. Link Telegram
 

@@ -42,9 +42,10 @@ mcp:
   # below regardless. Point your tunnel at this port.
   bind: "0.0.0.0"
   port: 4053
-  # Bearer key Poke must present on every MCP request. Leave blank to have one
-  # auto-generated and stored (chmod 600) at plugins/PokeMC/mcp-api-key.txt; or
-  # set it here to pin it. Register this exact key alongside the tunnel URL in Poke.
+  # Bearer key Poke must present on every MCP request. Leave blank and PokeMC
+  # generates one on first start, writes it back here, and prints it in the
+  # console — register THAT key (with your tunnel's /sse URL) in Poke. Or set
+  # your own to pin it.
   api-key: ""
   # If false (default), the genie starts AWAKE and the startup self-test is just
   # confirmation — because Poke's API path is slow and doesn't always call the

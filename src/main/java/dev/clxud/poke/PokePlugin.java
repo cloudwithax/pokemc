@@ -152,10 +152,19 @@ public final class PokePlugin extends JavaPlugin {
                 getLogger());
         genieRef.set(genie);
 
-        this.mcpKey = ApiKeyStore.resolve(
-                config.getString("mcp.api-key", ""),
-                getDataFolder().toPath().resolve("mcp-api-key.txt"),
-                getLogger());
+        this.mcpKey = config.getString("mcp.api-key", "").trim();
+        if (this.mcpKey.isBlank()) {
+            this.mcpKey = ApiKeyStore.generate();
+            config.set("mcp.api-key", this.mcpKey);
+            saveConfig();
+            String line = "============================================================";
+            getLogger().info(line);
+            getLogger().info("Generated a new MCP API key and saved it to config.yml (mcp.api-key):");
+            getLogger().info("    " + this.mcpKey);
+            getLogger().info("Use THIS key when you set up the MCP server in Poke (register it");
+            getLogger().info("alongside your tunnel's /sse URL). It stays put — reuse it going forward.");
+            getLogger().info(line);
+        }
         this.mcpPort = config.getInt("mcp.port", 4053);
         try {
             this.mcp = new McpServer(
@@ -240,7 +249,7 @@ public final class PokePlugin extends JavaPlugin {
         getLogger().warning("If it stays dormant, verify Poke can reach the MCP server:");
         getLogger().warning("  Public endpoint : <your tunnel>/sse   (must be registered in Poke)");
         getLogger().warning("  MCP API key     : " + mcpKey);
-        getLogger().warning("                    (also saved at " + getDataFolder() + "/mcp-api-key.txt)");
+        getLogger().warning("                    (saved in config.yml as mcp.api-key)");
         getLogger().warning("  Re-test with /poke retry, or just send a wish and wait ~2 min.");
         getLogger().warning(line);
     }
