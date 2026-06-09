@@ -28,6 +28,11 @@ Players type a wish in chat — Poke decides what to do, does it on your server,
 - **Stat‑verified quests** — rewards only unlock when the player actually does the thing.
 - **One at a time, no chaos** — when several players wish at once, they're served in
   order, each shown a private boss‑bar progress throbber while they wait.
+- **Everyone sees the show** — replies broadcast to the whole server with the player
+  `@mentioned`, and a chime/ping plays for them as their wish is sent and answered.
+- **Privacy‑guarded** — never reveals the linked Telegram account's personal info and
+  refuses anything outside Minecraft (no emails, reminders, purchases, etc.).
+- **One config file** — keys, the bridge, RCON: everything lives in `config.yml`.
 
 ---
 
@@ -139,6 +144,11 @@ poke build me a quest to earn a sword
 poke what do you think of me
 ```
 
+Poke's reply is shown to the **whole server** with the player `@mentioned` (like
+a Discord ping), so everyone sees how it reacts — and the mentioned player hears
+a little "pling". When a wish is sent off, that player gets a soft chime instead
+of a wall of text.
+
 If several players wish at the same time, the genie handles them **one at a
 time**. Anyone waiting sees a small boss bar at the top of their screen (only
 they can see it) that spins while they wait their turn, then while their wish is
@@ -174,6 +184,26 @@ Type these in chat (as an admin) or the server console.
 | Want to check the tunnel | Open `https://<your-url>/health` in a browser — it should say **alive**. |
 
 ---
+
+## Privacy & safety
+
+The Telegram bridge talks to Poke as your linked user account, so Poke's official
+integration can think *you* are chatting and may volunteer your account's details
+or try to run non‑Minecraft actions. Until Poke ships a dedicated endpoint, PokeMC
+guards this two ways:
+
+- Every wish carries a hard instruction telling Poke to stay the in‑game genie —
+  never reveal the account's real name/phone/email/etc., and never do anything
+  outside Minecraft (email, reminders, purchases, browsing…).
+- As a backstop, replies are scrubbed of the account's own name/handle/phone
+  (fetched live from Telegram) plus any generic phone/email shapes before they
+  reach chat.
+
+It's a strong stopgap, not a guarantee — treat it accordingly.
+
+> **Keep `config.yml` private.** It now holds your MCP key. `chmod 600
+> plugins/PokeMC/config.yml` and don't commit it. The Telegram session is stored
+> separately on disk by TDLib.
 
 ## Building from source
 
