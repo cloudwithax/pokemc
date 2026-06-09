@@ -10,7 +10,6 @@ import dev.clxud.poke.poke.PokeSender;
 import dev.clxud.poke.rcon.RconClient;
 import dev.clxud.poke.stats.StatsReader;
 import dev.clxud.poke.telegram.TdTelegramBridge;
-import dev.clxud.poke.util.DotEnv;
 import org.bukkit.ChatColor;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -21,7 +20,6 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletableFuture;
@@ -51,7 +49,6 @@ public final class PokePlugin extends JavaPlugin {
   private String mcpKey;
     private int mcpPort;
     private boolean requireConfirmation;
-    private Map<String, String> dotenv;
 
     @Override
     public void onEnable() {
@@ -66,29 +63,22 @@ public final class PokePlugin extends JavaPlugin {
 
     private boolean setup() {
         FileConfiguration config = getConfig();
-        this.dotenv = DotEnv.load(getDataFolder().toPath().resolve(".env"), getLogger());
 
         ConfigurationSection tg = config.getConfigurationSection("telegram");
-        String telegramEnabledValue = firstNonBlank(
-                System.getenv("TELEGRAM_ENABLED"),
-                dotenv.get("TELEGRAM_ENABLED"),
-                tg != null && tg.getBoolean("enabled", false) ? "true" : "");
-        boolean telegramEnabled = telegramEnabledValue.equalsIgnoreCase("true")
-                || telegramEnabledValue.equalsIgnoreCase("1")
-                || telegramEnabledValue.equalsIgnoreCase("yes");
+        boolean telegramEnabled = tg != null && tg.getBoolean("enabled", false);
 
         // Replies are delivered through the Telegram DM thread: the plain Poke API
         // path does not reliably trigger the reply_to_player tool, so the bridge
         // is required. (Poke still acts on the server via the MCP tools either way.)
         if (!telegramEnabled) {
             getLogger().severe("PokeMC requires the Telegram bridge — the plain Poke API path does not "
-                    + "reliably deliver replies. Set TELEGRAM_ENABLED=true (or telegram.enabled: true) and "
-                    + "link with /poke link. Disabling PokeMC.");
+                    + "reliably deliver replies. Set telegram.enabled: true in config.yml and link with "
+                    + "/poke link. Disabling PokeMC.");
             getServer().getPluginManager().disablePlugin(this);
             return false;
         }
 
-        String pokeKey = resolvePokeKey(config);
+        String pokeKey = config.getString("poke.api-key", "");
 
         this.rcon = new RconClient(
                 config.getString("rcon.host", "127.0.0.1"),
@@ -109,35 +99,18 @@ public final class PokePlugin extends JavaPlugin {
         if (telegramEnabled) {
             // App credentials default to PokeMC's bundled Telegram app (like most
             // shipped TDLib clients), so a fresh install only needs enabled: true
-            // and the console link flow. Override via env/.env/config if you'd
-            // rather use your own from https://my.telegram.org.
-            String apiIdStr = firstNonBlank(
-                    System.getenv("TELEGRAM_API_ID"),
-                    dotenv.get("TELEGRAM_API_ID"),
-                    tg.getString("api-id", ""),
-                    DEFAULT_TELEGRAM_API_ID);
+            // and the console link flow. Override api-id/api-hash in config.yml if
+            // you'd rather use your own from https://my.telegram.org.
+            String apiIdStr = firstNonBlank(tg.getString("api-id", ""), DEFAULT_TELEGRAM_API_ID);
             int apiId = apiIdStr.isBlank() ? 0 : Integer.parseInt(apiIdStr);
-            String apiHash = firstNonBlank(
-                    System.getenv("TELEGRAM_API_HASH"),
-                    dotenv.get("TELEGRAM_API_HASH"),
-                    tg.getString("api-hash", ""),
-                    DEFAULT_TELEGRAM_API_HASH);
-            String phoneNumber = firstNonBlank(
-                    System.getenv("TELEGRAM_PHONE_NUMBER"),
-                    dotenv.get("TELEGRAM_PHONE_NUMBER"),
-                    tg.getString("phone-number", ""));
-            String authCode = firstNonBlank(
-                    System.getenv("TELEGRAM_AUTH_CODE"),
-                    dotenv.get("TELEGRAM_AUTH_CODE"),
-                    tg.getString("auth-code", ""));
-            String authPassword = firstNonBlank(
-                    System.getenv("TELEGRAM_AUTH_PASSWORD"),
-                    dotenv.get("TELEGRAM_AUTH_PASSWORD"),
-                    tg.getString("auth-password", ""));
+            String apiHash = firstNonBlank(tg.getString("api-hash", ""), DEFAULT_TELEGRAM_API_HASH);
+            String phoneNumber = tg.getString("phone-number", "");
+            String authCode = tg.getString("auth-code", "");
+            String authPassword = tg.getString("auth-password", "");
             String botUsername = tg.getString("bot-username", "interaction_poke_bot");
 
             if (apiId <= 0 || apiHash.isBlank()) {
-                getLogger().severe("Telegram bridge is enabled, but TELEGRAM_API_ID / TELEGRAM_API_HASH are missing.");
+                getLogger().severe("Telegram bridge is enabled, but telegram.api-id / telegram.api-hash are missing.");
                 getServer().getPluginManager().disablePlugin(this);
                 return false;
             }
@@ -179,12 +152,8 @@ public final class PokePlugin extends JavaPlugin {
                 getLogger());
         genieRef.set(genie);
 
-        String mcpConfigured = firstNonBlank(
-                System.getenv("MCP_API_KEY"),
-                dotenv.get("MCP_API_KEY"),
-                config.getString("mcp.api-key", ""));
         this.mcpKey = ApiKeyStore.resolve(
-                mcpConfigured,
+                config.getString("mcp.api-key", ""),
                 getDataFolder().toPath().resolve("mcp-api-key.txt"),
                 getLogger());
         this.mcpPort = config.getInt("mcp.port", 4053);
@@ -274,14 +243,6 @@ public final class PokePlugin extends JavaPlugin {
         getLogger().warning("                    (also saved at " + getDataFolder() + "/mcp-api-key.txt)");
         getLogger().warning("  Re-test with /poke retry, or just send a wish and wait ~2 min.");
         getLogger().warning(line);
-    }
-
-    private String resolvePokeKey(FileConfiguration config) {
-        // Precedence: real OS env var > .env file > config.yml.
-        return firstNonBlank(
-                System.getenv("POKE_API_KEY"),
-                dotenv.get("POKE_API_KEY"),
-                config.getString("poke.api-key", ""));
     }
 
     private static String firstNonBlank(String... values) {

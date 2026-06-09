@@ -102,11 +102,8 @@ npx poke@latest mcp add https://something-random.trycloudflare.com/sse -n minecr
 
 ### 5. Link Telegram
 
-This is how Poke talks back. In `plugins/PokeMC/.env`, add:
-
-```bash
-TELEGRAM_ENABLED=true
-```
+This is how Poke talks back. It's already enabled by default in
+`plugins/PokeMC/config.yml` (`telegram.enabled: true`).
 
 Start the server, then type these in the **server console**, one at a time:
 
@@ -167,7 +164,7 @@ Type these in chat (as an admin) or the server console.
 
 | Problem | Fix |
 | --- | --- |
-| Plugin disabled itself on start | Telegram is required. Set `TELEGRAM_ENABLED=true` in `plugins/PokeMC/.env` and restart, then link with `/poke link`. |
+| Plugin disabled itself on start | Telegram is required. Set `telegram.enabled: true` in `plugins/PokeMC/config.yml` and restart, then link with `/poke link`. |
 | Genie won't act (no items/commands) | The tunnel (Step 3) or the connect step (Step 4) isn't set up. Re‑check both. |
 | Genie acts but never replies | Telegram isn't linked. Run `/poke status`, then the command it asks for. |
 | Commands don't work at all | RCON isn't on. Re‑check Step 2 in `server.properties`. |

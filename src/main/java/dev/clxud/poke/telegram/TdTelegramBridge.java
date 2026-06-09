@@ -59,9 +59,9 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
     private final PokeReplyHandler replyHandler;
     private final Logger logger;
 
-    // Login secrets. Seeded from config/.env but also settable live via the
+    // Login secrets. Seeded from config.yml but also settable live via the
     // /poke link|code|password console commands, so first-time linking never
-    // requires editing .env or restarting.
+    // requires editing config or restarting.
     private volatile String phoneNumber;
     private volatile String authCode;
     private volatile String authPassword;
@@ -400,7 +400,7 @@ public final class TdTelegramBridge implements PokeSender, AutoCloseable {
 
     /**
      * Stores the linked phone (chmod 600) so a future session wipe can re-link
-     * from console without re-editing .env. Best-effort; never fatal.
+     * from console without re-editing config. Best-effort; never fatal.
      */
     private void persistPhone(String phone) {
         if (phone == null || phone.isBlank()) {

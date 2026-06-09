@@ -1,9 +1,12 @@
 # ============================================================
 #  PokeMC — a Minecraft genie admin, powered by Poke
 # ============================================================
+# This file is the single source of configuration — keys, the Telegram bridge,
+# RCON, everything. There is no .env; edit the values here.
+#
 # How it works:
 #   1. A player types "poke <wish>" in chat.
-#   2. The plugin sends the wish to YOUR Poke (poke.api-key) via the Poke API.
+#   2. The plugin relays the wish to YOUR Poke through the Telegram bridge.
 #   3. Poke, with its own personality, calls back into the MCP server this
 #      plugin hosts to inspect the player, run commands, set quests, and finally
 #      speak to the player in-game (the reply_to_player tool).
@@ -13,6 +16,9 @@
 # `npx poke@latest tunnel`). On startup the plugin self-tests the connection; if
 # Poke can't reach the tools, the genie stays dormant and the console explains
 # how to fix it.
+#
+# NOTE: this file holds secrets (MCP key, Telegram session is on disk separately).
+# Keep it private — chmod 600 plugins/PokeMC/config.yml — and never commit it.
 
 poke:
   # NOTE: Not needed in the normal (Telegram) setup — wishes go through the
@@ -37,8 +43,8 @@ mcp:
   bind: "0.0.0.0"
   port: 4053
   # Bearer key Poke must present on every MCP request. Leave blank to have one
-  # auto-generated and stored (chmod 600) at plugins/PokeMC/mcp-api-key.txt.
-  # Register this exact key alongside the tunnel URL in Poke.
+  # auto-generated and stored (chmod 600) at plugins/PokeMC/mcp-api-key.txt; or
+  # set it here to pin it. Register this exact key alongside the tunnel URL in Poke.
   api-key: ""
   # If false (default), the genie starts AWAKE and the startup self-test is just
   # confirmation — because Poke's API path is slow and doesn't always call the
@@ -76,7 +82,7 @@ max-give-count: 1024
 # so the bridge is required — PokeMC disables itself if this is off. The Linux
 # x86_64 TDLib runtime is bundled in the jar and extracted automatically.
 #
-# LINKING IS DONE FROM THE CONSOLE — no restarts, no editing .env mid-login:
+# LINKING IS DONE FROM THE CONSOLE — no restarts, no editing config mid-login:
 #   1. telegram.enabled: true, then start the server.
 #   2. /poke link <+phone>     Telegram texts/DMs a login code to that number.
 #   3. /poke code <code>       (and /poke password <pw> if you use 2FA).
