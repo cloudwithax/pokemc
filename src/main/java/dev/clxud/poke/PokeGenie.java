@@ -15,6 +15,7 @@ import dev.clxud.poke.util.ChatSanitizer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
+import org.bukkit.Sound;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
@@ -176,7 +177,8 @@ public final class PokeGenie {
                 PlayerProfile profile = memory.get(q.uuid, q.name);
                 PendingWish wishState = new PendingWish(q.uuid, q.name, q.wish, profile);
                 pending.put(key, wishState);
-                speakByName(q.name, "Your wish drifts off into the beyond. We shall see what answers...");
+                // The boss bar shows the wish is in flight; a soft chime confirms it left.
+                playSound(q.name, Sound.BLOCK_AMETHYST_BLOCK_CHIME, 0.6f, 1.2f);
                 poke.send(wishMessage(q.name, q.wish, profile));
             } catch (Exception e) {
                 logger.warning("Failed to send wish from " + q.name + " to Poke: " + e.getMessage());
@@ -521,6 +523,7 @@ public final class PokeGenie {
         }
         logger.info("Poke reply -> " + name + ": " + clean);
         speakByName(name, clean);
+        playSound(name, Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.5f);
 
         if (p != null) {
             p.replied = true;
@@ -550,6 +553,7 @@ public final class PokeGenie {
         if (clean.isBlank()) clean = "As you wish... or perhaps not.";
         logger.info("Telegram reply for " + p.name + ": " + clean);
         speakByName(p.name, clean);
+        playSound(p.name, Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.5f);
         p.replied = true;
         commit(p, clean);
         completeActive(p);
@@ -696,6 +700,18 @@ public final class PokeGenie {
             Player p = Bukkit.getPlayerExact(name);
             if (p != null && p.isOnline()) {
                 p.sendMessage(prefix.append(Component.text(text, NamedTextColor.WHITE)));
+            }
+        });
+    }
+
+    private void playSound(String name, Sound sound, float volume, float pitch) {
+        if (name == null) {
+            return;
+        }
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            Player p = Bukkit.getPlayerExact(name);
+            if (p != null && p.isOnline()) {
+                p.playSound(p.getLocation(), sound, volume, pitch);
             }
         });
     }
