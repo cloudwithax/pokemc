@@ -1,0 +1,6 @@
+# Secrets — never commit
+.env
+mcp-api-key.txt
+
+# Build output
+/target/

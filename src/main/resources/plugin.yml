@@ -1,0 +1,20 @@
+name: PokeMC
+version: ${project.version}
+main: dev.clxud.poke.PokePlugin
+api-version: '1.21'
+author: clxud
+description: A Minecraft genie admin powered by Poke, via the Poke API + a built-in MCP server.
+load: POSTWORLD
+folia-supported: false
+commands:
+  poke:
+    description: Admin controls for the PokeMC genie.
+    usage: /poke <status|retry|reload|link|code|password>
+    permission: poke.admin
+permissions:
+  poke.admin:
+    description: Allows managing the PokeMC plugin.
+    default: op
+  poke.use:
+    description: Allows making wishes to Poke via chat.
+    default: true

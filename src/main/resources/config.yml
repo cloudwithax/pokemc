@@ -1,0 +1,99 @@
+# ============================================================
+#  PokeMC — a Minecraft genie admin, powered by Poke
+# ============================================================
+# How it works:
+#   1. A player types "poke <wish>" in chat.
+#   2. The plugin sends the wish to YOUR Poke (poke.api-key) via the Poke API.
+#   3. Poke, with its own personality, calls back into the MCP server this
+#      plugin hosts to inspect the player, run commands, set quests, and finally
+#      speak to the player in-game (the reply_to_player tool).
+#
+# Because Poke reaches the MCP server over the public internet, you must expose
+# it at a public HTTPS URL via a tunnel of your choice (cloudflared / ngrok /
+# `npx poke@latest tunnel`). On startup the plugin self-tests the connection; if
+# Poke can't reach the tools, the genie stays dormant and the console explains
+# how to fix it.
+
+poke:
+  # Your Poke API key (a V2 key from Kitchen), used to send messages to Poke.
+  # Best kept OUT of this file: put POKE_API_KEY in plugins/PokeMC/.env (chmod
+  # 600) or export it as an environment variable. Precedence:
+  #   real env var  >  plugins/PokeMC/.env  >  this value.
+  api-key: ""
+  api-url: "https://poke.com/api/v1/inbound/api-message"
+  # HTTP timeout for calls to the Poke API, seconds.
+  timeout-seconds: 30
+  # On startup, how long to wait for Poke to call confirm_tools back through the
+  # MCP server. NOTE: Poke's API path is slow (it can take 1-2 minutes to act on
+  # a message), so keep this generous. Even if it times out, the genie wakes
+  # automatically the moment Poke first calls any tool.
+  probe-timeout-seconds: 180
+  # How long a wish waits for Poke to call reply_to_player before it is
+  # auto-finalised (Poke went quiet), seconds. Poke replies are not instant.
+  wish-timeout-seconds: 300
+
+mcp:
+  # The plugin hosts an MCP server here for Poke to connect to. Bind 0.0.0.0 so a
+  # sidecar tunnel (or Docker) can reach it; it is protected by the bearer key
+  # below regardless. Point your tunnel at this port.
+  bind: "0.0.0.0"
+  port: 4053
+  # Bearer key Poke must present on every MCP request. Leave blank to have one
+  # auto-generated and stored (chmod 600) at plugins/PokeMC/mcp-api-key.txt.
+  # Register this exact key alongside the tunnel URL in Poke.
+  api-key: ""
+  # If false (default), the genie starts AWAKE and the startup self-test is just
+  # confirmation — because Poke's API path is slow and doesn't always call the
+  # meta confirm_tools tool. Set true for strict gating: the genie stays DORMANT
+  # and refuses wishes until Poke calls a tool back.
+  require-confirmation: false
+
+rcon:
+  # Poke runs commands through your server's built-in RCON.
+  # Enable it in server.properties:
+  #     enable-rcon=true
+  #     rcon.port=25575
+  #     rcon.password=<something secret>
+  # Then mirror the port/password here.
+  host: "127.0.0.1"
+  port: 25575
+  password: "changeme"
+
+# The word that triggers the genie in chat, e.g. "poke give me a sword".
+# Case-insensitive. Players need the poke.use permission (default: true).
+trigger: "poke"
+
+# The bold-gold name shown before the genie's in-game messages ("Poke » ...").
+display-name: "Poke"
+
+# Hard cap on item counts the genie may hand out in a single /give.
+max-give-count: 1024
+
+# ============================================================
+# Telegram bridge (TDLib user client)
+# ============================================================
+# When enabled, wishes are sent to Poke through Telegram and replies are read
+# back from the same DM with @interaction_poke_bot. The Linux x86_64 TDLib
+# runtime is bundled inside the plugin jar and extracted automatically.
+#
+# LINKING IS DONE FROM THE CONSOLE — no restarts, no editing .env mid-login:
+#   1. telegram.enabled: true, then start the server.
+#   2. /poke link <+phone>     Telegram texts/DMs a login code to that number.
+#   3. /poke code <code>       (and /poke password <pw> if you use 2FA).
+# That's it. The session is saved on disk by TDLib, so every later restart goes
+# straight to LINKED with no code needed. Watch progress with /poke status.
+telegram:
+  enabled: false
+  # App credentials default to PokeMC's bundled Telegram app, so you normally
+  # leave these blank. Override with your own (https://my.telegram.org → API
+  # development tools) only if you want to.
+  api-id: ""
+  api-hash: ""
+  # Optional: pre-fill the account phone (E.164, e.g. "+15551234567") so you can
+  # skip /poke link. Leave blank to link entirely from the console instead.
+  phone-number: ""
+  # Optional pre-seeds; normally left blank and supplied via /poke code|password.
+  auth-code: ""
+  auth-password: ""
+  # Username of the bot you DM for Poke (no @ symbol).
+  bot-username: "interaction_poke_bot"
