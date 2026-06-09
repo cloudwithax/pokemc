@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="https://i.imgur.com/8sVzfth.png" width="128" alt="PokeMC logo" />
+
 # PokeMC
 
 **A Minecraft genie powered by [Poke](https://poke.com).**
