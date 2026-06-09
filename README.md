@@ -96,15 +96,21 @@ Leave this running.
 
 ### 4. Connect the tunnel to Poke
 
-Tell Poke where your server is (use **your** URL, and keep the `/sse` on the end):
+Add your server as an MCP integration in Poke (the official way):
+**<https://poke.com/settings/connections/integrations/new>**
 
-```bash
-npx poke@latest mcp add https://something-random.trycloudflare.com/sse -n minecraft
-```
+Fill it in like this:
 
-> If it asks for a secret key: on first start PokeMC generates one, writes it
-> into `plugins/PokeMC/config.yml` (`mcp.api-key`), and prints it in the server
-> console — copy it from either place.
+- **URL** — your tunnel URL **with `/sse` on the end**, e.g.
+  `https://something-random.trycloudflare.com/sse`
+- **API key** — paste PokeMC's MCP key here. On first start it's generated into
+  `plugins/PokeMC/config.yml` (`mcp.api-key`) and printed in the server console;
+  copy it from either place.
+
+> ⚠️ **Two things people get wrong — get both right or it won't work:**
+> 1. The URL **must end in `/sse`**. Without it, Poke connects but sees **no tools**.
+> 2. You **must** fill in the **API key**, even though the website marks it
+>    *optional*. Leaving it blank breaks the connection.
 
 ### 5. Link Telegram
 
