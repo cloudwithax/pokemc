@@ -77,13 +77,18 @@ public final class PokePlugin extends JavaPlugin {
                 || telegramEnabledValue.equalsIgnoreCase("1")
                 || telegramEnabledValue.equalsIgnoreCase("yes");
 
-        String pokeKey = resolvePokeKey(config);
-        if (!telegramEnabled && (pokeKey == null || pokeKey.isBlank())) {
-            getLogger().severe("No Poke API key configured. Set poke.api-key in config.yml or the "
-                    + "POKE_API_KEY environment variable. Disabling PokeMC.");
+        // Replies are delivered through the Telegram DM thread: the plain Poke API
+        // path does not reliably trigger the reply_to_player tool, so the bridge
+        // is required. (Poke still acts on the server via the MCP tools either way.)
+        if (!telegramEnabled) {
+            getLogger().severe("PokeMC requires the Telegram bridge — the plain Poke API path does not "
+                    + "reliably deliver replies. Set TELEGRAM_ENABLED=true (or telegram.enabled: true) and "
+                    + "link with /poke link. Disabling PokeMC.");
             getServer().getPluginManager().disablePlugin(this);
             return false;
         }
+
+        String pokeKey = resolvePokeKey(config);
 
         this.rcon = new RconClient(
                 config.getString("rcon.host", "127.0.0.1"),
@@ -164,9 +169,12 @@ public final class PokePlugin extends JavaPlugin {
                     config.getInt("poke.timeout-seconds", 30));
         }
 
+        TdTelegramBridge bridge = this.telegram;
         this.genie = new PokeGenie(this, pokeSender, rcon, guard, memory, stats, inspector,
                 config.getString("display-name", "Poke"),
                 config.getInt("poke.wish-timeout-seconds", 300),
+                telegramEnabled,
+                () -> bridge != null && bridge.isLinked(),
                 getLogger());
         genieRef.set(genie);
 
@@ -293,6 +301,7 @@ public void onDisable() {
     mcp.stop();
   }
   if (genie != null) {
+    genie.shutdown();
     genie.sweep();
   }
   if (rcon != null) {
@@ -318,7 +327,8 @@ public void onDisable() {
                 sender.sendMessage(ChatColor.GOLD + "PokeMC " + ChatColor.GRAY + "— genie "
                         + (ready ? ChatColor.GREEN + "AWAKE" : ChatColor.RED + "DORMANT")
                         + ChatColor.GRAY + ", MCP on port " + mcpPort
-                        + ", wishes in flight: " + (genie == null ? "n/a" : genie.pendingCount()));
+                        + ", wishes in flight: " + (genie == null ? "n/a" : genie.pendingCount())
+                        + ", queued: " + (genie == null ? "n/a" : genie.queuedCount()));
                 if (telegram != null) {
                     boolean linked = telegram.isLinked();
                     sender.sendMessage(ChatColor.GOLD + "Telegram " + ChatColor.GRAY + "@"

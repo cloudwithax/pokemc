@@ -13,7 +13,7 @@ Players type a wish in chat — Poke decides what to do, does it on your server,
 ![Powered by Poke](https://img.shields.io/badge/Powered%20by-Poke-ff4f00)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-[Features](#features) · [Setup](#setup-5-steps) · [Telegram](#telegram-optional) · [Commands](#commands) · [Troubleshooting](#troubleshooting)
+[Features](#features) · [Setup](#setup-5-steps) · [How players use it](#how-players-use-it) · [Commands](#commands) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -26,32 +26,40 @@ Players type a wish in chat — Poke decides what to do, does it on your server,
 - **Acts on the server** — gives items, runs commands, sets quests.
 - **Safe by default** — a built‑in guard blocks op/ban/gamemode and other dangerous commands.
 - **Stat‑verified quests** — rewards only unlock when the player actually does the thing.
-- **Optional Telegram link** — talk to Poke through a normal Telegram chat instead.
-- **One jar** — drop it in `plugins/`, everything else is bundled.
+- **One at a time, no chaos** — when several players wish at once, they're served in
+  order, each shown a private boss‑bar progress throbber while they wait.
 
 ---
 
 ## How it works
 
 ```
-Player types in chat:  "poke give me a netherite sword"
-        |
-        v
-   PokeMC  -->  Poke (your AI)  -->  back into your server
-                                      |- checks the player
-                                      |- runs the command
-                                      |- replies in-game:  Poke » Here you go!
+Player: "poke give me a netherite sword"
+   |
+   v
+PokeMC  -->  Poke (your AI), reached over a Telegram chat
+   |              |
+   |              |- acts on your server through PokeMC's tools (the tunnel)
+   |              |- writes its reply back in the Telegram chat
+   v              v
+Poke » Here you go!   (shown in Minecraft chat)
 ```
 
-Poke lives on the internet, so it needs a **public address** to reach your
-server. That's the tunnel in Step 4 below. Don't worry — it's one command.
+Two connections make this work, and you set up both below:
+
+1. **A tunnel** — so Poke can reach your server to *do* things (give items, run commands).
+2. **Telegram** — so Poke can *talk back*. (Poke's plain API can act but doesn't reliably
+   send replies, so PokeMC routes the conversation through a Telegram chat. This is required.)
+
+Don't worry — both are just a few commands.
 
 ---
 
 ## Setup (5 steps)
 
-> You need a **Paper or Spigot** Minecraft server (version **1.21**) and a
-> **[Poke](https://poke.com) account**. Do the steps **in order**.
+> You need a **Paper or Spigot** Minecraft server (version **1.21**), a
+> **[Poke](https://poke.com) account**, and a **Telegram account**. Do the steps
+> **in order**.
 
 ### 1. Install the plugin
 
@@ -60,7 +68,7 @@ once, then stop it. (This creates the config files.)
 
 ### 2. Turn on RCON
 
-Open `server.properties` and set these three lines:
+This is how Poke runs commands. Open `server.properties` and set these three lines:
 
 ```properties
 enable-rcon=true
@@ -68,20 +76,9 @@ rcon.port=25575
 rcon.password=pick-a-password
 ```
 
-### 3. Add your Poke API key
+### 3. Open a tunnel
 
-Get a key from Poke (Kitchen → API keys). Create a file at
-`plugins/PokeMC/.env` and paste this in:
-
-```bash
-POKE_API_KEY=paste-your-key-here
-```
-
-> Keep this file private. Never share it or upload it anywhere.
-
-### 4. Make your server reachable (the tunnel)
-
-Poke needs to reach your server from the internet. Install
+This gives your server a public address so Poke can reach it. Install
 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
 and run **one** command:
 
@@ -92,21 +89,39 @@ cloudflared tunnel --url http://localhost:4053
 It prints a URL like `https://something-random.trycloudflare.com`. **Copy it.**
 Leave this running.
 
-### 5. Connect it to Poke
+### 4. Connect the tunnel to Poke
 
-Tell Poke about your server. Run this (replace the URL with yours):
+Tell Poke where your server is (use **your** URL, and keep the `/sse` on the end):
 
 ```bash
 npx poke@latest mcp add https://something-random.trycloudflare.com/sse -n minecraft
 ```
 
-> The "secret key" Poke needs is auto‑generated and saved at
-> `plugins/PokeMC/mcp-api-key.txt`. If the command asks for it, copy it from
-> that file.
+> If it asks for a secret key, it's auto‑generated and saved at
+> `plugins/PokeMC/mcp-api-key.txt` — copy it from there.
+
+### 5. Link Telegram
+
+This is how Poke talks back. In `plugins/PokeMC/.env`, add:
+
+```bash
+TELEGRAM_ENABLED=true
+```
+
+Start the server, then type these in the **server console**, one at a time:
+
+```
+/poke link +15551234567     (your phone number)
+/poke code 12345            (the code Telegram texts you)
+/poke password yourpass     (ONLY if your Telegram has 2FA)
+```
+
+You only ever do this **once** — PokeMC remembers the login, so every restart
+after this just works. Check it anytime with `/poke status`.
 
 ### Done
 
-Start your server. In‑game, type:
+In‑game, type:
 
 ```
 poke say hello
@@ -116,27 +131,20 @@ If the genie replies, **it works.**
 
 ---
 
-## Telegram (optional)
+## How players use it
 
-Want to talk to Poke through a real **Telegram** chat instead? You can. It links
-**from the server console — no restarts, no file editing.**
-
-**1.** Turn it on. In `plugins/PokeMC/.env` add:
-
-```bash
-TELEGRAM_ENABLED=true
-```
-
-**2.** Start the server, then type these in the **server console**, one at a time:
+Anyone just types `poke` and what they want in chat:
 
 ```
-/poke link +15551234567     (your phone number)
-/poke code 12345            (the code Telegram texts you)
-/poke password yourpass     (ONLY if your Telegram has 2FA)
+poke give me a stack of diamonds
+poke build me a quest to earn a sword
+poke what do you think of me
 ```
 
-**3.** That's it. Check it with `/poke status`. You only ever do this **once** —
-PokeMC remembers the login, so every restart after this just works.
+If several players wish at the same time, the genie handles them **one at a
+time**. Anyone waiting sees a small boss bar at the top of their screen (only
+they can see it) that spins while they wait their turn, then while their wish is
+being granted. It clears when the genie replies.
 
 ---
 
@@ -146,7 +154,7 @@ Type these in chat (as an admin) or the server console.
 
 | Command | What it does |
 | --- | --- |
-| `/poke status` | Is the genie awake? Is Telegram linked? |
+| `/poke status` | Is the genie awake? Is Telegram linked? Who's in line? |
 | `/poke retry` | Re‑test the connection to Poke |
 | `/poke reload` | Reload the config |
 | `/poke link <+phone>` | Start linking Telegram |
@@ -159,10 +167,11 @@ Type these in chat (as an admin) or the server console.
 
 | Problem | Fix |
 | --- | --- |
-| Genie won't reply in chat | Make sure Step 4 (tunnel) is still running and Step 5 (connect to Poke) was done. |
-| "No Poke API key configured" | Re‑check Step 3. The key goes in `plugins/PokeMC/.env`. |
-| Commands don't work | RCON isn't on. Re‑check Step 2 in `server.properties`. |
-| Tunnel URL stopped working | Free cloudflared URLs change each run. Re‑run Step 4 and Step 5 with the new URL. |
+| Plugin disabled itself on start | Telegram is required. Set `TELEGRAM_ENABLED=true` in `plugins/PokeMC/.env` and restart, then link with `/poke link`. |
+| Genie won't act (no items/commands) | The tunnel (Step 3) or the connect step (Step 4) isn't set up. Re‑check both. |
+| Genie acts but never replies | Telegram isn't linked. Run `/poke status`, then the command it asks for. |
+| Commands don't work at all | RCON isn't on. Re‑check Step 2 in `server.properties`. |
+| Tunnel URL stopped working | Free cloudflared URLs change each run. Re‑run Step 3 and Step 4 with the new URL. |
 | Telegram won't link | Run `/poke status` to see what it's waiting for, then run the matching command. |
 | Want to check the tunnel | Open `https://<your-url>/health` in a browser — it should say **alive**. |
 
@@ -183,7 +192,7 @@ mvn -DskipTests package
 
 - **[Poke](https://poke.com)** — the AI brain.
 - **Clanker** — the project PokeMC is forked from.
-- **[TDLib](https://core.telegram.org/tdlib)** — powers the optional Telegram bridge.
+- **[TDLib](https://core.telegram.org/tdlib)** — powers the Telegram bridge.
 
 ---
 

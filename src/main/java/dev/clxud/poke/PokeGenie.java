@@ -19,8 +19,10 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -30,6 +32,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
 
 /**
@@ -62,12 +65,22 @@ public final class PokeGenie {
     /** Names with a wish in flight — claimed synchronously to dedupe rapid resubmits. */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
+    // Telegram is a single, one-at-a-time DM thread: only one wish may be out at
+    // once, or replies can't be told apart. When {@code serialize} is on, extra
+    // wishes wait in {@code queue} behind the {@code activeKey} holder.
+    private final boolean serialize;
+    private final BooleanSupplier linkReady;
+    private final WishHud hud;
+    private final Deque<QueuedWish> queue = new ArrayDeque<>();
+    private final Object lock = new Object();
+    private String activeKey; // the lowercased name whose wish is out now; guarded by lock
+
     private volatile boolean ready = false;
     private volatile CompletableFuture<Set<String>> probe;
 
     public PokeGenie(Plugin plugin, PokeSender poke, RconClient rcon, CommandGuard guard, PlayerMemory memory,
                      StatsReader stats, PlayerInspector inspector, String displayName, int wishTimeoutSeconds,
-                     Logger logger) {
+                     boolean serialize, BooleanSupplier linkReady, Logger logger) {
         this.plugin = plugin;
         this.poke = poke;
         this.rcon = rcon;
@@ -76,6 +89,9 @@ public final class PokeGenie {
         this.stats = stats;
         this.inspector = inspector;
         this.wishTimeoutMillis = wishTimeoutSeconds * 1000L;
+        this.serialize = serialize;
+        this.linkReady = linkReady;
+        this.hud = new WishHud(plugin);
         this.logger = logger;
         this.prefix = Component.text(displayName, NamedTextColor.GOLD, TextDecoration.BOLD)
                 .append(Component.text(" » ", NamedTextColor.DARK_GRAY));
@@ -95,6 +111,18 @@ public final class PokeGenie {
         return pending.size();
     }
 
+    /** How many wishes are waiting in line behind the active one. */
+    public int queuedCount() {
+        synchronized (lock) {
+            return queue.size();
+        }
+    }
+
+    /** Hides any lingering boss bars on shutdown. */
+    public void shutdown() {
+        hud.shutdown();
+    }
+
     /** Arms a fresh probe future; {@code confirm_tools} completes it. */
     public CompletableFuture<Set<String>> armProbe() {
         CompletableFuture<Set<String>> f = new CompletableFuture<>();
@@ -109,29 +137,113 @@ public final class PokeGenie {
 
     // ---- wish intake -------------------------------------------------------
 
-    /** Routes a chat wish to Poke. Runs the network/IO off the calling thread. */
+    /**
+     * Routes a chat wish to Poke. In serialized (Telegram) mode only one wish is
+     * out at a time; the rest wait in line with a boss-bar throbber. The actual
+     * network send happens off the calling thread.
+     */
     public void submitWish(Player player, String wish) {
         String key = player.getName().toLowerCase(Locale.ROOT);
+        if (!linkReady.getAsBoolean()) {
+            speak(player, "The genie's voice to the beyond is not linked yet. An admin must run /poke link.");
+            return;
+        }
         if (!inFlight.add(key)) {
             speak(player, "Patience — I am still pondering your last wish.");
             return;
         }
-        UUID uuid = player.getUniqueId();
-        String name = player.getName();
+        QueuedWish q = new QueuedWish(player.getUniqueId(), player.getName(), wish);
+        if (serialize) {
+            synchronized (lock) {
+                if (activeKey != null) {
+                    queue.addLast(q);
+                    int position = queue.size();
+                    speak(player, "The genie is granting another wish — you are #" + position + " in line.");
+                    hud.showQueued(q.uuid, position);
+                    return;
+                }
+                activeKey = key;
+            }
+        }
+        dispatch(q);
+    }
+
+    /** Sends one wish to Poke and marks it the active pending wish. */
+    private void dispatch(QueuedWish q) {
+        String key = q.name.toLowerCase(Locale.ROOT);
+        hud.showWorking(q.uuid);
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                PlayerProfile profile = memory.get(uuid, name);
-                PendingWish wishState = new PendingWish(uuid, name, wish, profile);
+                PlayerProfile profile = memory.get(q.uuid, q.name);
+                PendingWish wishState = new PendingWish(q.uuid, q.name, q.wish, profile);
                 pending.put(key, wishState);
-                speak(player, "Your wish drifts off into the beyond. We shall see what answers...");
-                poke.send(wishMessage(name, wish, profile));
+                speakByName(q.name, "Your wish drifts off into the beyond. We shall see what answers...");
+                poke.send(wishMessage(q.name, q.wish, profile));
             } catch (Exception e) {
+                logger.warning("Failed to send wish from " + q.name + " to Poke: " + e.getMessage());
                 pending.remove(key);
-                inFlight.remove(key);
-                logger.warning("Failed to send wish from " + name + " to Poke: " + e.getMessage());
-                speak(player, "The link to the beyond flickers and dies. Try again in a moment, mortal.");
+                speakByName(q.name, "The link to the beyond flickers and dies. Try again in a moment, mortal.");
+                releaseActive(key, q.uuid); // free the line and send the next
             }
         });
+    }
+
+    /** Finalises the active wish (reply or timeout): clears state, drops the bar, advances the line. */
+    private void completeActive(PendingWish p) {
+        String key = p.name.toLowerCase(Locale.ROOT);
+        pending.remove(key);
+        releaseActive(key, p.uuid);
+    }
+
+    private void releaseActive(String key, UUID uuid) {
+        inFlight.remove(key);
+        hud.remove(uuid);
+        advanceQueue(key);
+    }
+
+    /** If {@code finishedKey} held the line, send the next queued wish (if any). */
+    private void advanceQueue(String finishedKey) {
+        if (!serialize) {
+            return;
+        }
+        QueuedWish next;
+        synchronized (lock) {
+            if (!finishedKey.equals(activeKey)) {
+                return;
+            }
+            next = queue.pollFirst();
+            activeKey = next == null ? null : next.name.toLowerCase(Locale.ROOT);
+        }
+        if (next != null) {
+            refreshQueuePositions();
+            dispatch(next);
+        }
+    }
+
+    private void refreshQueuePositions() {
+        synchronized (lock) {
+            int position = 1;
+            for (QueuedWish q : queue) {
+                hud.showQueued(q.uuid, position++);
+            }
+        }
+    }
+
+    /** Drops a leaving player's bar and removes them from the line if they were waiting. */
+    public void handleQuit(UUID uuid, String name) {
+        String key = name.toLowerCase(Locale.ROOT);
+        hud.remove(uuid);
+        if (!serialize) {
+            return;
+        }
+        boolean wasQueued;
+        synchronized (lock) {
+            wasQueued = queue.removeIf(q -> q.uuid.equals(uuid));
+        }
+        if (wasQueued) {
+            inFlight.remove(key);
+            refreshQueuePositions();
+        }
     }
 
     /** Finalises wishes Poke never replied to (e.g. it acted but never spoke, or went silent). */
@@ -141,13 +253,11 @@ public final class PokeGenie {
             if (p.replied || now - p.submittedAt <= wishTimeoutMillis) {
                 continue;
             }
-            String key = p.name.toLowerCase(Locale.ROOT);
-            pending.remove(key);
-            inFlight.remove(key);
             commit(p, p.executed.isEmpty() ? "(no reply)" : "(acted without a final word)");
             if (p.executed.isEmpty() && !p.questAssigned) {
                 speakByName(p.name, "The genie's attention drifts elsewhere, unimpressed. Try again.");
             }
+            completeActive(p);
         }
     }
 
@@ -415,10 +525,8 @@ public final class PokeGenie {
 
         if (p != null) {
             p.replied = true;
-            String key = p.name.toLowerCase(Locale.ROOT);
-            pending.remove(key);
-            inFlight.remove(key);
             commit(p, clean);
+            completeActive(p);
         }
         return "Delivered to " + (name == null ? "the player" : name) + " in-game.";
     }
@@ -439,10 +547,8 @@ public final class PokeGenie {
             logger.info("Telegram reply for " + p.name + ": " + clean);
             speakByName(p.name, clean);
             p.replied = true;
-            String key = p.name.toLowerCase(Locale.ROOT);
-            pending.remove(key);
-            inFlight.remove(key);
             commit(p, clean);
+            completeActive(p);
         } else {
             // No pending wish — broadcast to all online ops as fallback
             logger.warning("Telegram reply received but no pending wish; broadcasting to ops.");
@@ -630,6 +736,19 @@ public final class PokeGenie {
     }
 
     // ---- per-wish bookkeeping ---------------------------------------------
+
+    /** A wish accepted from chat but not yet sent (it may be waiting in line). */
+    private static final class QueuedWish {
+        final UUID uuid;
+        final String name;
+        final String wish;
+
+        QueuedWish(UUID uuid, String name, String wish) {
+            this.uuid = uuid;
+            this.name = name;
+            this.wish = wish;
+        }
+    }
 
     private static final class PendingWish {
         final UUID uuid;

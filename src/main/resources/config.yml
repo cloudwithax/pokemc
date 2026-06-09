@@ -15,10 +15,8 @@
 # how to fix it.
 
 poke:
-  # Your Poke API key (a V2 key from Kitchen), used to send messages to Poke.
-  # Best kept OUT of this file: put POKE_API_KEY in plugins/PokeMC/.env (chmod
-  # 600) or export it as an environment variable. Precedence:
-  #   real env var  >  plugins/PokeMC/.env  >  this value.
+  # NOTE: Not needed in the normal (Telegram) setup — wishes go through the
+  # Telegram chat, not this key. Left here for reference only.
   api-key: ""
   api-url: "https://poke.com/api/v1/inbound/api-message"
   # HTTP timeout for calls to the Poke API, seconds.
@@ -70,11 +68,13 @@ display-name: "Poke"
 max-give-count: 1024
 
 # ============================================================
-# Telegram bridge (TDLib user client)
+# Telegram bridge (TDLib user client) — REQUIRED
 # ============================================================
-# When enabled, wishes are sent to Poke through Telegram and replies are read
-# back from the same DM with @interaction_poke_bot. The Linux x86_64 TDLib
-# runtime is bundled inside the plugin jar and extracted automatically.
+# This is how Poke talks back. Wishes are sent to Poke through a Telegram chat
+# with @interaction_poke_bot and its replies are read back from that same chat.
+# Poke's plain API can act on the server but does NOT reliably deliver replies,
+# so the bridge is required — PokeMC disables itself if this is off. The Linux
+# x86_64 TDLib runtime is bundled in the jar and extracted automatically.
 #
 # LINKING IS DONE FROM THE CONSOLE — no restarts, no editing .env mid-login:
 #   1. telegram.enabled: true, then start the server.
@@ -83,7 +83,7 @@ max-give-count: 1024
 # That's it. The session is saved on disk by TDLib, so every later restart goes
 # straight to LINKED with no code needed. Watch progress with /poke status.
 telegram:
-  enabled: false
+  enabled: true
   # App credentials default to PokeMC's bundled Telegram app, so you normally
   # leave these blank. Override with your own (https://my.telegram.org → API
   # development tools) only if you want to.
