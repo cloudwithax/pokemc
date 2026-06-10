@@ -35,13 +35,34 @@ poke:
   # How long a wish waits for Poke to call reply_to_player before it is
   # auto-finalised (Poke went quiet), seconds. Poke replies are not instant.
   wish-timeout-seconds: 300
+  # Minimum seconds between a player's accepted wishes (rate limit). Throttles
+  # spam and the Poke API spend it would burn. 0 disables. (One wish per player
+  # is always in flight at a time regardless.)
+  wish-cooldown-seconds: 3
 
 mcp:
   # The plugin hosts an MCP server here for Poke to connect to. Bind 0.0.0.0 so a
-  # sidecar tunnel (or Docker) can reach it; it is protected by the bearer key
-  # below regardless. Point your tunnel at this port.
+  # tunnel, Docker, or your host's port forwarding can reach it; it is protected
+  # by the bearer key below regardless.
   bind: "0.0.0.0"
+  # Default MCP port. Change this to any free port if 4053 is taken or your host
+  # requires a specific allocated port — just keep it consistent with your tunnel
+  # / reverse-proxy / public-host setup below.
   port: 4053
+  # --- How Poke reaches this server -----------------------------------------
+  # Poke connects FROM the internet, so this port must be publicly reachable.
+  # Two ways:
+  #   A) MANAGED HOST, NO TUNNEL: allocate an extra/additional
+  #      port in your panel, set `port` above to it, and set `public-host` to the
+  #      same address players connect to. PokeMC then prints the exact URL + key
+  #      to register in Poke (also via /poke url). No sidecar process needed.
+  #   B) TUNNEL/PROXY: run cloudflared / ngrok / `npx poke@latest tunnel` at this
+  #      port, or a reverse proxy, and put its public https URL in `public-url`.
+  # public-url wins if set; otherwise public-host builds http://host:port/sse.
+  # NOTE: if Poke rejects a plain-http URL, you need option B (https) — e.g. a
+  # free Cloudflare tunnel pointed at this port from any always-on machine.
+  public-host: ""
+  public-url: ""
   # Bearer key Poke must present on every MCP request. Leave blank and PokeMC
   # generates one on first start, writes it back here, and prints it in the
   # console — register THAT key (with your tunnel's /sse URL) in Poke. Or set
@@ -52,6 +73,39 @@ mcp:
   # meta confirm_tools tool. Set true for strict gating: the genie stays DORMANT
   # and refuses wishes until Poke calls a tool back.
   require-confirmation: false
+  # --- Hardening ------------------------------------------------------------
+  # The transport is plain HTTP, so treat the bearer key as something that COULD
+  # leak and limit the damage. (Built-in already: a body-size cap, a request
+  # timeout, a bounded thread pool, a per-IP failed-auth throttle, and a cap on
+  # concurrent SSE streams — no config needed.)
+  #
+  # Source-IP allowlist. Exact IPs or CIDR ranges, e.g. ["203.0.113.7",
+  # "203.0.113.0/24"]. NOTE: this checks the TCP source IP, so it only helps on
+  # the direct/extra-port path; behind a reverse proxy the source is the proxy.
+  # With learn-caller-ips on (below), this list AUTO-POPULATES — you can leave it
+  # empty and PokeMC fills in Poke's real calling IP on first contact.
+  allowed-ips: []
+  # Trust-on-first-use. While true, any request bearing the valid key from an IP
+  # not yet listed is admitted ONCE, and that IP is written straight into
+  # allowed-ips above (live). This is how PokeMC learns Poke's egress IP(s) from
+  # its first authenticated callback. The allowlist still blocks unauthenticated
+  # scanners throughout. Once your allowed-ips looks complete and stable, set this
+  # to false to FREEZE the list — then even a valid key from an unlisted IP is
+  # refused (strict IP lockout).
+  learn-caller-ips: true
+  # When the allowlist is enforced, also auto-allow this host's own public IP
+  # (detected at startup in the background) plus loopback, so a fronting proxy or
+  # same-host tunnel can't lock itself out. If the lookup fails, loopback only.
+  # Set false to skip the lookup entirely.
+  allow-public-ip: true
+  # Read-only mode: refuse the state-changing tools (run_command, assign_quest,
+  # complete_quest, remember) and hide them from tools/list. Inspection and the
+  # genie's chat reply still work — minimal blast radius if the key leaks.
+  read-only: false
+  # Explicit tool allowlist. Empty = every tool (still subject to read-only).
+  # List tool names to expose ONLY those, e.g. ["inspect_player", "read_stat"].
+  # confirm_tools and reply_to_player are always permitted (operational).
+  allowed-tools: []
 
 rcon:
   # Poke runs commands through your server's built-in RCON.
@@ -73,6 +127,18 @@ display-name: "Poke"
 
 # Hard cap on item counts the genie may hand out in a single /give.
 max-give-count: 1024
+
+# Command safety guard. PokeMC enforces an ALLOW-LIST: because a player controls
+# the chat text that becomes Poke's prompt, Poke must be assumed jailbreakable, so
+# only known-safe item/cosmetic commands run (give, enchant, xp, effect, time,
+# weather, summon, particle, playsound, data get, execute). EVERYTHING else —
+# op/ban/gamemode, tp, kill/clear/fill, raw-NBT summons, and ALL third-party
+# plugin commands — is blocked by default.
+guard:
+  # Extra command verbs to permit, if you knowingly want the genie to use them
+  # (e.g. an economy plugin). These bypass the safe default — only add commands
+  # you trust the AI to run. Example: ["eco", "lp"].
+  extra-allowed-commands: []
 
 # ============================================================
 # Telegram bridge (TDLib user client) — REQUIRED

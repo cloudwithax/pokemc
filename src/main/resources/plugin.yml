@@ -9,7 +9,7 @@ folia-supported: false
 commands:
   poke:
     description: Admin controls for the PokeMC genie.
-    usage: /poke <status|retry|reload|link|code|password>
+    usage: /poke <status|url|retry|reload|link|code|password>
     permission: poke.admin
 permissions:
   poke.admin:

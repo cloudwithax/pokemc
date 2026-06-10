@@ -4,6 +4,8 @@ import dev.clxud.poke.guard.CommandGuard;
 import dev.clxud.poke.inspect.PlayerInspector;
 import dev.clxud.poke.mcp.ApiKeyStore;
 import dev.clxud.poke.mcp.McpServer;
+import dev.clxud.poke.mcp.PublicIpResolver;
+import dev.clxud.poke.mcp.SecurityPolicy;
 import dev.clxud.poke.memory.PlayerMemory;
 import dev.clxud.poke.poke.PokeClient;
 import dev.clxud.poke.poke.PokeSender;
@@ -20,7 +22,11 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -85,7 +91,9 @@ public final class PokePlugin extends JavaPlugin {
                 config.getInt("rcon.port", 25575),
                 config.getString("rcon.password", "changeme"));
 
-        CommandGuard guard = new CommandGuard(config.getInt("max-give-count", 1024));
+        CommandGuard guard = new CommandGuard(
+                config.getInt("max-give-count", 1024),
+                Set.copyOf(config.getStringList("guard.extra-allowed-commands")));
         PlayerMemory memory = new PlayerMemory(getDataFolder(), getLogger());
 
         File worldFolder = getServer().getWorlds().isEmpty()
@@ -146,6 +154,7 @@ public final class PokePlugin extends JavaPlugin {
         this.genie = new PokeGenie(this, pokeSender, rcon, guard, memory, stats, inspector,
                 config.getString("display-name", "Poke"),
                 config.getInt("poke.wish-timeout-seconds", 300),
+                config.getInt("poke.wish-cooldown-seconds", 3),
                 telegramEnabled,
                 () -> bridge != null && bridge.isLinked(),
                 () -> bridge != null ? bridge.privacyTokens() : Set.of(),
@@ -166,13 +175,57 @@ public final class PokePlugin extends JavaPlugin {
             getLogger().info(line);
         }
         this.mcpPort = config.getInt("mcp.port", 4053);
+        List<String> allowedIps = config.getStringList("mcp.allowed-ips");
+        boolean learnCallers = config.getBoolean("mcp.learn-caller-ips", true);
+        boolean allowPublicIp = config.getBoolean("mcp.allow-public-ip", true);
+        // Enforce the IP allowlist when the operator listed IPs OR we're learning
+        // callers (so the list self-populates from Poke's authenticated callbacks).
+        boolean enforceIps = !allowedIps.isEmpty() || learnCallers;
+        // Loopback is always safe when enforcing (same-host tunnel/proxy); the public
+        // IP is detected asynchronously below so the lookup can't stall startup.
+        List<String> autoIps = new ArrayList<>();
+        if (enforceIps && allowPublicIp) {
+            autoIps.add("127.0.0.1");
+            autoIps.add("::1");
+        }
+        SecurityPolicy policy = new SecurityPolicy(
+                allowedIps, autoIps, enforceIps,
+                config.getBoolean("mcp.read-only", false),
+                config.getStringList("mcp.allowed-tools"),
+                getLogger());
+        // Persist each newly learned caller IP back to config.yml, on the main thread.
+        Consumer<InetAddress> onLearned = !learnCallers ? null : addr -> {
+            String ip = addr.getHostAddress();
+            getServer().getScheduler().runTask(this, () -> {
+                List<String> ips = getConfig().getStringList("mcp.allowed-ips");
+                if (!ips.contains(ip)) {
+                    ips.add(ip);
+                    getConfig().set("mcp.allowed-ips", ips);
+                    saveConfig();
+                    getLogger().info("Saved learned caller IP " + ip + " to mcp.allowed-ips.");
+                }
+            });
+        };
+        // Detect our own public IP off-thread and fold it into the live allowlist.
+        if (enforceIps && allowPublicIp) {
+            getServer().getScheduler().runTaskAsynchronously(this, () ->
+                    PublicIpResolver.detect(getLogger()).ifPresent(ip -> {
+                        try {
+                            policy.addAllowed(InetAddress.getByName(ip));
+                        } catch (Exception ignored) {
+                            // unparseable / unreachable — loopback + learned IPs still apply
+                        }
+                    }));
+        }
         try {
             this.mcp = new McpServer(
                     config.getString("mcp.bind", "0.0.0.0"), mcpPort, mcpKey,
-                    getPluginMeta().getVersion(), genie, getLogger());
+                    getPluginMeta().getVersion(), genie, policy, learnCallers, onLearned, getLogger());
             this.mcp.start();
             getLogger().info("MCP server listening on " + config.getString("mcp.bind", "0.0.0.0")
                     + ":" + mcpPort + " (paths: /sse and /mcp).");
+            getLogger().info("MCP hardening: " + policy.summary() + ".");
+            advertiseEndpoint();
         } catch (IOException e) {
             getLogger().severe("Could not start the MCP server on port " + mcpPort + ": " + e.getMessage()
                     + ". Disabling PokeMC.");
@@ -247,11 +300,56 @@ public final class PokePlugin extends JavaPlugin {
         getLogger().warning("PokeMC's startup self-test did not get a callback (strict mode) — genie DORMANT.");
         getLogger().warning("This can just be Poke's latency; it wakes automatically on the first tool call.");
         getLogger().warning("If it stays dormant, verify Poke can reach the MCP server:");
-        getLogger().warning("  Public endpoint : <your tunnel>/sse   (must be registered in Poke)");
+        String url = registrationUrl();
+        getLogger().warning("  Public endpoint : " + (url != null ? url
+                : "http://<your server's public address>:" + mcpPort + "/sse")
+                + "   (must be registered in Poke)");
         getLogger().warning("  MCP API key     : " + mcpKey);
         getLogger().warning("                    (saved in config.yml as mcp.api-key)");
         getLogger().warning("  Re-test with /poke retry, or just send a wish and wait ~2 min.");
         getLogger().warning(line);
+    }
+
+    /**
+     * The public {@code /sse} URL to register in Poke. Prefers an explicit
+     * {@code mcp.public-url} (e.g. an https tunnel/proxy), otherwise builds a
+     * plain {@code http://host:port/sse} from {@code mcp.public-host} — the
+     * no-tunnel path for managed hosts that expose an extra public port. Returns
+     * null when neither is configured.
+     */
+    private String registrationUrl() {
+        String full = getConfig().getString("mcp.public-url", "").trim();
+        if (!full.isBlank()) {
+            return full;
+        }
+        String host = getConfig().getString("mcp.public-host", "").trim();
+        if (host.isBlank()) {
+            return null;
+        }
+        host = host.replaceFirst("^https?://", "").replaceFirst("/.*$", "");
+        return "http://" + host + ":" + mcpPort + "/sse";
+    }
+
+    /**
+     * Prints the two values an admin must paste into Poke to connect — no tunnel
+     * required if the host exposes this port publicly (e.g. an "extra port"
+     * allocation on a managed host). Surfaced again on demand via {@code /poke url}.
+     */
+    private void advertiseEndpoint() {
+        String line = "============================================================";
+        String url = registrationUrl();
+        getLogger().info(line);
+        getLogger().info("Register PokeMC's MCP server in Poke with THESE two values:");
+        if (url != null) {
+            getLogger().info("  URL : " + url);
+        } else {
+            getLogger().info("  URL : http://<your server's public address>:" + mcpPort + "/sse");
+            getLogger().info("        Set mcp.public-host in config.yml (your server IP/host) to print it exactly.");
+        }
+        getLogger().info("  Key : " + mcpKey + "   (Poke sends it as 'Authorization: Bearer <key>')");
+        getLogger().info("No tunnel needed if your host exposes this port publicly — e.g. an 'extra");
+        getLogger().info("port' on most managed hosting panels. See the README for details.");
+        getLogger().info(line);
     }
 
     private static String firstNonBlank(String... values) {
@@ -289,7 +387,7 @@ public void onDisable() {
         }
         if (args.length == 0) {
             sender.sendMessage(ChatColor.GREEN + "PokeMC " + ChatColor.GRAY + "v" + getPluginMeta().getVersion()
-                    + " — usage: /poke <status|retry|reload|link|code|password>");
+                    + " — usage: /poke <status|url|retry|reload|link|code|password>");
             return true;
         }
         switch (args[0].toLowerCase()) {
@@ -328,6 +426,15 @@ public void onDisable() {
                     sender.sendMessage(ChatColor.GREEN + telegram.submitPassword(args.length > 1 ? args[1] : null));
                 }
             }
+            case "url" -> {
+                String url = registrationUrl();
+                sender.sendMessage(ChatColor.GREEN + "Register this MCP server in Poke (no tunnel needed if "
+                        + "this port is public):");
+                sender.sendMessage(ChatColor.GRAY + "  URL: " + ChatColor.WHITE
+                        + (url != null ? url : "http://<public-host>:" + mcpPort + "/sse  "
+                        + "(set mcp.public-host in config.yml)"));
+                sender.sendMessage(ChatColor.GRAY + "  Key: " + ChatColor.WHITE + mcpKey);
+            }
             case "retry" -> {
                 if (genie == null) {
                     sender.sendMessage(ChatColor.RED + "PokeMC is not set up.");
@@ -351,7 +458,7 @@ public void onDisable() {
                     sender.sendMessage(ChatColor.RED + "PokeMC reload failed — check console.");
                 }
             }
-            default -> sender.sendMessage(ChatColor.RED + "Unknown subcommand. Use /poke <status|retry|reload|link|code|password>");
+            default -> sender.sendMessage(ChatColor.RED + "Unknown subcommand. Use /poke <status|url|retry|reload|link|code|password>");
         }
         return true;
     }

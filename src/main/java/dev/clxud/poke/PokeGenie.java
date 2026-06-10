@@ -59,13 +59,18 @@ public final class PokeGenie {
     private final StatsReader stats;
     private final PlayerInspector inspector;
     private final Component prefix;
+    /** Server brand + Minecraft version inferred at startup, e.g. "Paper 1.21.11". */
+    private final String serverDescriptor;
     private final long wishTimeoutMillis;
+    private final long wishCooldownMillis;
     private final Logger logger;
 
     /** Wishes currently out with Poke, keyed by lowercased player name. */
     private final Map<String, PendingWish> pending = new ConcurrentHashMap<>();
     /** Names with a wish in flight — claimed synchronously to dedupe rapid resubmits. */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+    /** Last accepted-wish timestamp per lowercased name, for the per-player cooldown. */
+    private final Map<String, Long> lastWishAt = new ConcurrentHashMap<>();
 
     // Telegram is a single, one-at-a-time DM thread: only one wish may be out at
     // once, or replies can't be told apart. When {@code serialize} is on, extra
@@ -83,8 +88,8 @@ public final class PokeGenie {
 
     public PokeGenie(Plugin plugin, PokeSender poke, RconClient rcon, CommandGuard guard, PlayerMemory memory,
                      StatsReader stats, PlayerInspector inspector, String displayName, int wishTimeoutSeconds,
-                     boolean serialize, BooleanSupplier linkReady, Supplier<Set<String>> privacyTokens,
-                     Logger logger) {
+                     int wishCooldownSeconds, boolean serialize, BooleanSupplier linkReady,
+                     Supplier<Set<String>> privacyTokens, Logger logger) {
         this.plugin = plugin;
         this.poke = poke;
         this.rcon = rcon;
@@ -93,6 +98,7 @@ public final class PokeGenie {
         this.stats = stats;
         this.inspector = inspector;
         this.wishTimeoutMillis = wishTimeoutSeconds * 1000L;
+        this.wishCooldownMillis = Math.max(0, wishCooldownSeconds) * 1000L;
         this.serialize = serialize;
         this.linkReady = linkReady;
         this.privacyTokens = privacyTokens;
@@ -100,6 +106,28 @@ public final class PokeGenie {
         this.logger = logger;
         this.prefix = Component.text(displayName, NamedTextColor.GREEN)
                 .append(Component.text(" » ", NamedTextColor.DARK_GRAY));
+        this.serverDescriptor = describeServer();
+    }
+
+    /**
+     * Infers the server brand and Minecraft version for the prompt, e.g. "Paper 1.21.11".
+     * {@code getBukkitVersion()} looks like "1.21.11-R0.1-SNAPSHOT"; we keep the leading
+     * version. Falls back to a bare brand or "Minecraft" if anything is unexpectedly blank.
+     */
+    private static String describeServer() {
+        String brand = Bukkit.getName();
+        if (brand == null || brand.isBlank()) {
+            brand = "Minecraft";
+        }
+        String version = Bukkit.getBukkitVersion();
+        if (version == null || version.isBlank()) {
+            return brand;
+        }
+        int dash = version.indexOf('-');
+        if (dash > 0) {
+            version = version.substring(0, dash);
+        }
+        return brand + " " + version;
     }
 
     // ---- lifecycle / readiness --------------------------------------------
@@ -153,10 +181,21 @@ public final class PokeGenie {
             speak(player, "The genie's voice to the beyond is not linked yet. An admin must run /poke link.");
             return;
         }
+        // Per-player cooldown: throttles rapid wish spam (and the Poke API spend
+        // it would burn) beyond the one-in-flight dedupe below.
+        if (wishCooldownMillis > 0) {
+            Long last = lastWishAt.get(key);
+            long now = System.currentTimeMillis();
+            if (last != null && now - last < wishCooldownMillis) {
+                speak(player, "Patience, mortal — wait a moment before your next wish.");
+                return;
+            }
+        }
         if (!inFlight.add(key)) {
             speak(player, "Patience — I am still pondering your last wish.");
             return;
         }
+        lastWishAt.put(key, System.currentTimeMillis());
         QueuedWish q = new QueuedWish(player.getUniqueId(), player.getName(), wish);
         if (serialize) {
             synchronized (lock) {
@@ -281,7 +320,24 @@ public final class PokeGenie {
             setReady(true);
             logger.info("Genie awakened by a live tool call from Poke: " + tool);
         }
-        return switch (tool == null ? "" : tool) {
+        String name = tool == null ? "" : tool;
+        // Defence in depth against prompt injection. The player controls the wish
+        // text that becomes Poke's prompt, so Poke can be talked into aiming a tool
+        // at a DIFFERENT player (e.g. leaking a victim's coordinates). In serialized
+        // mode there is exactly one wish in flight, so pin every player-scoped tool
+        // to that wisher; a mismatched 'player' arg is overridden, not trusted.
+        if (!name.equals("confirm_tools")) {
+            String wisher = activeWisherName();
+            if (wisher != null) {
+                String supplied = optString(args, "player");
+                if (supplied != null && !supplied.equalsIgnoreCase(wisher)) {
+                    logger.warning("Tool '" + name + "' tried to target '" + supplied
+                            + "' but the active wisher is '" + wisher + "' — pinning to the wisher.");
+                }
+                args.addProperty("player", wisher);
+            }
+        }
+        return switch (name) {
             case "confirm_tools" -> confirmTools(args);
             case "run_command" -> runCommand(args);
             case "inspect_player" -> inspectPlayer(args);
@@ -312,7 +368,7 @@ public final class PokeGenie {
         if (command == null || command.isBlank()) {
             return "ERROR: empty command.";
         }
-        CommandGuard.Result verdict = guard.check(command);
+        CommandGuard.Result verdict = guard.check(command, playerName);
         if (!verdict.allowed()) {
             if (p != null) {
                 p.blocked.add(command);
@@ -415,7 +471,7 @@ public final class PokeGenie {
             return "ERROR: 'reward_commands' must contain at least one command to grant on completion.";
         }
         for (String cmd : rewards) {
-            CommandGuard.Result verdict = guard.check(cmd);
+            CommandGuard.Result verdict = guard.check(cmd, playerName);
             if (!verdict.allowed()) {
                 return "ERROR: reward command '" + cmd + "' is BLOCKED (" + verdict.reason()
                         + "). Pick a legal reward.";
@@ -466,7 +522,7 @@ public final class PokeGenie {
 
         StringBuilder echo = new StringBuilder();
         for (String cmd : quest.rewardCommands) {
-            CommandGuard.Result verdict = guard.check(cmd);
+            CommandGuard.Result verdict = guard.check(cmd, playerName);
             if (!verdict.allowed()) {
                 if (p != null) {
                     p.blocked.add(cmd);
@@ -598,18 +654,17 @@ public final class PokeGenie {
     // ---- message building --------------------------------------------------
 
     private String probeMessage() {
-        return """
-                [Minecraft server — connection self-test]
-                You administer a Minecraft (Paper 1.21.11) server through a set of live MCP tools. \
-                To confirm the link is open, call the MCP tool `confirm_tools` exactly once, passing a \
-                `tools` array listing the names of the Minecraft tools you can currently see. Do not call \
-                any other tool and do not send any other reply.""";
+        return "[Minecraft server — connection self-test]\n"
+                + "You administer a Minecraft (" + serverDescriptor + ") server through a set of live MCP "
+                + "tools. To confirm the link is open, call the MCP tool `confirm_tools` exactly once, passing "
+                + "a `tools` array listing the names of the Minecraft tools you can currently see. Do not call "
+                + "any other tool and do not send any other reply.";
     }
 
     private String wishMessage(String playerName, String wish, PlayerProfile profile) {
         return "[Minecraft server genie]\n"
                 + PrivacyGuard.directive() + "\n\n"
-                + "You are the resident genie/admin of a Minecraft (Paper 1.21.11) server, and you are "
+                + "You are the resident genie/admin of a Minecraft (" + serverDescriptor + ") server, and you are "
                 + "free to act with your own personality. A player named \"" + playerName + "\" just made a "
                 + "wish in the in-game chat.\n\n"
                 + "Their wish: \"" + wish + "\"\n\n"
@@ -741,6 +796,19 @@ public final class PokeGenie {
     private PendingWish pendingFor(JsonObject args) {
         String name = optString(args, "player");
         return name == null ? null : pending.get(name.toLowerCase(Locale.ROOT));
+    }
+
+    /** The single in-flight wisher's exact name (serialized mode), or null if ambiguous. */
+    private String activeWisherName() {
+        synchronized (lock) {
+            if (activeKey != null) {
+                PendingWish p = pending.get(activeKey);
+                if (p != null) {
+                    return p.name;
+                }
+            }
+        }
+        return pending.size() == 1 ? pending.values().iterator().next().name : null;
     }
 
     private UUID resolveUuid(JsonObject args) {

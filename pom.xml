@@ -14,6 +14,14 @@
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!--
+          Single universal jar: compiled against the 1.21.11 API (Java 21) and
+          verified to link cleanly against the 26.1.2 API as well, so one jar runs
+          on both Minecraft 1.21.11 and 26.1.2 servers. Building natively against
+          26.1.2 would require JDK 25 (its API is Java 25 bytecode); it is not
+          needed since every API symbol this plugin uses is identical across both.
+        -->
+        <paper.version>1.21.11-R0.1-SNAPSHOT</paper.version>
     </properties>
 
     <repositories>
@@ -27,7 +35,7 @@
         <dependency>
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
-            <version>1.21.11-R0.1-SNAPSHOT</version>
+            <version>${paper.version}</version>
             <scope>provided</scope>
         </dependency>
         <!-- Gson is bundled with Paper at runtime; compile against it only. -->
@@ -46,6 +54,19 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <!--
+                  CommandGuardTest is a standalone, dependency-free harness (it has
+                  a main(), no JUnit) run manually per its Javadoc. We still let the
+                  build COMPILE it (so it can't rot), but skip the surefire run,
+                  which would otherwise try to resolve a test provider.
+                -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skipTests>true</skipTests>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

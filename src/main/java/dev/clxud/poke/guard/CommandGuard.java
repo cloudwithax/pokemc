@@ -1,39 +1,45 @@
 package dev.clxud.poke.guard;
 
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Hard safety layer between Clanker and the server console. The AI is told the
+ * Hard safety layer between the genie and the server console. The AI is told the
  * rules in its system prompt, but this class is the part that actually enforces
- * them — defence in depth. Every command the agent wants to run is checked here
- * first; rejections come back with a reason so the genie can find another
- * (legal) technicality.
+ * them — defence in depth against prompt injection. Every command Poke wants to
+ * run is checked here first; rejections come back with a reason so the genie can
+ * find another (legal) technicality.
+ *
+ * <p><b>Allow-list, not deny-list.</b> A player fully controls the chat text that
+ * becomes Poke's prompt, so Poke must be assumed jailbreakable — this guard is the
+ * only real backstop. A deny-list ("block op/ban/...") is structurally incomplete:
+ * any verb not enumerated (a new vanilla command, or ANY third-party plugin
+ * command like {@code /lp}, {@code /pex}, {@code /eco}) would sail through and
+ * could grant real OP. So only an explicit set of known-safe verbs is permitted;
+ * everything else is denied by default. Admins who knowingly want more can add
+ * verbs via {@code guard.extra-allowed-commands} in config.yml.
  */
 public final class CommandGuard {
 
-    /** Verbs Clanker may never run, in any form. */
-    private static final Set<String> BLOCKED_VERBS = Set.of(
-            // Operator / server lifecycle
-            "op", "deop", "stop", "restart", "reload", "rl",
-            // Moderation powers
-            "ban", "ban-ip", "banip", "banlist", "pardon", "pardon-ip", "pardonip", "kick", "whitelist",
-            // Persistence / internals
-            "save-off", "save-on", "save-all", "saveoff", "saveon", "saveall",
-            "debug", "perf", "jfr", "spark", "datapack", "function", "schedule",
-            "forceload", "setidletimeout", "publish",
-            // God-mode equivalents
-            "gamemode", "defaultgamemode", "gamerule", "attribute",
-            // Plugin / server introspection & control
-            "plugins", "pl", "version", "ver", "timings", "mspt", "tps"
+    /** Vanilla verbs the genie may run to grant item/cosmetic wishes. Anything else is denied. */
+    private static final Set<String> BASE_ALLOWED = Set.of(
+            "give", "item",            // hand out items (component/enchant/count-checked)
+            "enchant",                 // enchant held item (vanilla caps enforced)
+            "xp", "experience",        // grant experience
+            "effect",                  // potion effects (harmful effects blocked below)
+            "time", "weather",         // cosmetic world state ("make it day")
+            "playsound", "particle",   // harmless flair (particle is lag-capped)
+            "data",                    // read-only: only the "data get" form is allowed
+            "summon",                  // spawn a plain entity (raw NBT is blocked below)
+            "execute"                  // wrapper: the inner "run" command is re-checked
     );
 
     /**
      * Admin/creative-only item & block ids. Handing any of these out is an
-     * "OP item" — forbidden. Checked only for verbs that place or give things,
-     * to avoid false positives in chat/text commands.
+     * "OP item" — forbidden. Checked only for verbs that place or give things.
      */
     private static final Set<String> ADMIN_ITEMS = Set.of(
             "command_block", "chain_command_block", "repeating_command_block", "command_block_minecart",
@@ -43,12 +49,34 @@ public final class CommandGuard {
             "nether_portal", "end_portal", "frosted_ice"
     );
 
-    private static final Set<String> ITEM_VERBS = Set.of(
-            "give", "item", "setblock", "fill", "clone", "summon", "loot", "replaceitem", "place"
+    /** Allowed verbs that put items/entities into the world — get the admin-item scan. */
+    private static final Set<String> ITEM_VERBS = Set.of("give", "item", "summon");
+
+    /** Allowed verbs that get a "lag bomb" numeric sanity check on their coordinates/counts. */
+    private static final Set<String> VOLUME_VERBS = Set.of("summon", "particle");
+
+    /**
+     * Entities that are effectively weapons/grief tools — blocked from /summon
+     * even without NBT. Harmless mobs (cow, villager, ...) stay summonable.
+     */
+    private static final Set<String> DANGEROUS_ENTITIES = Set.of(
+            "tnt", "primed_tnt", "tnt_minecart", "end_crystal", "fireball", "small_fireball",
+            "dragon_fireball", "wither_skull", "wither", "ender_dragon", "falling_block",
+            "area_effect_cloud", "evoker_fangs", "lightning_bolt"
     );
 
-    /** Verbs that get a "lag bomb" numeric sanity check on their coordinates/counts. */
-    private static final Set<String> VOLUME_VERBS = Set.of("fill", "clone", "particle", "summon");
+    /**
+     * Status effects the genie may NOT apply — they harm or grief the target.
+     * Beneficial effects (speed, regeneration, night_vision, ...) stay allowed.
+     */
+    private static final Set<String> HARMFUL_EFFECTS = Set.of(
+            "instant_damage", "harming", "wither", "poison", "weakness", "slowness", "mining_fatigue",
+            "nausea", "blindness", "hunger", "levitation", "bad_omen", "darkness", "unluck",
+            "infested", "oozing", "weaving", "wind_charged", "trial_omen"
+    );
+
+    /** Any target selector: @a @e @p @r @s (and the verbose @e[...] forms). */
+    private static final Pattern SELECTOR = Pattern.compile("@[a-zA-Z]");
 
     private static final Pattern COMPONENT_KEY = Pattern.compile("(?:minecraft:)?([a-zA-Z0-9_]+)\\s*=");
     private static final Pattern ENCHANT_PAIR =
@@ -57,11 +85,27 @@ public final class CommandGuard {
 
     private static final Set<String> ALLOWED_COMPONENTS = Set.of("enchantments", "stored_enchantments");
     private static final int VOLUME_LIMIT = 20_000;
+    private static final int MAX_EFFECT_AMPLIFIER = 10;
 
     private final int maxGiveCount;
+    /** Extra verbs an admin opted into via config, already namespace-stripped + lowercased. */
+    private final Set<String> extraAllowed;
 
     public CommandGuard(int maxGiveCount) {
+        this(maxGiveCount, Set.of());
+    }
+
+    public CommandGuard(int maxGiveCount, Set<String> extraAllowedVerbs) {
         this.maxGiveCount = maxGiveCount;
+        Set<String> extras = new HashSet<>();
+        if (extraAllowedVerbs != null) {
+            for (String v : extraAllowedVerbs) {
+                if (v != null && !v.isBlank()) {
+                    extras.add(stripNamespace(v.trim().toLowerCase(Locale.ROOT)));
+                }
+            }
+        }
+        this.extraAllowed = Set.copyOf(extras);
     }
 
     public record Result(boolean allowed, String reason) {
@@ -74,7 +118,23 @@ public final class CommandGuard {
         }
     }
 
+    private boolean isAllowedVerb(String verb) {
+        return BASE_ALLOWED.contains(verb) || extraAllowed.contains(verb);
+    }
+
     public Result check(String rawCommand) {
+        return check(rawCommand, null);
+    }
+
+    /**
+     * @param rawCommand the command Poke wants to run.
+     * @param wisher     the exact name of the player this wish is for, or null if
+     *                   unknown. When non-null, every command must act on THAT
+     *                   player by name — a command naming a different player is
+     *                   refused. Broad/other targeting via @-selectors is always
+     *                   refused, wisher known or not.
+     */
+    public Result check(String rawCommand, String wisher) {
         if (rawCommand == null) {
             return Result.deny("empty command");
         }
@@ -89,8 +149,18 @@ public final class CommandGuard {
         String[] tokens = command.split("\\s+");
         String verb = stripNamespace(tokens[0].toLowerCase(Locale.ROOT));
 
-        if (BLOCKED_VERBS.contains(verb)) {
-            return Result.deny("the '" + verb + "' command is off-limits (operator / dangerous / god-mode power)");
+        // Allow-list gate: anything not explicitly known-safe is refused.
+        if (!isAllowedVerb(verb)) {
+            return Result.deny("the '" + verb + "' command isn't on the genie's allow-list of safe commands "
+                    + "(only item/cosmetic commands are permitted)");
+        }
+
+        // Target-selector ban: a player controls the wish, so the genie may only
+        // act on that one player BY NAME. @a/@e/@p/@r/@s could hit everyone or
+        // another player — refuse them outright (covers the whole command, incl.
+        // anything wrapped in /execute).
+        if (SELECTOR.matcher(command).find()) {
+            return Result.deny("target the player by their exact name, not @-selectors like @a/@p/@s");
         }
 
         // /execute can wrap another command after "run" — guard that recursively.
@@ -99,7 +169,7 @@ public final class CommandGuard {
             if (runIdx >= 0) {
                 String inner = command.substring(runIdx + 3).trim();
                 if (!inner.isEmpty()) {
-                    Result innerResult = check(inner);
+                    Result innerResult = check(inner, wisher);
                     if (!innerResult.allowed()) {
                         return Result.deny("execute -> " + innerResult.reason());
                     }
@@ -113,6 +183,21 @@ public final class CommandGuard {
             if (tokens.length < 2 || !tokens[1].equalsIgnoreCase("get")) {
                 return Result.deny("only the read-only 'data get' form is allowed, not 'data "
                         + (tokens.length > 1 ? tokens[1] : "") + "'");
+            }
+        }
+
+        // /summon with raw NBT can spawn OP-geared item entities (e.g. a dropped
+        // sharpness-255 sword) and bypass the give-path component checks entirely.
+        // Only plain summons (no {...}) are permitted.
+        if (verb.equals("summon")) {
+            if (command.indexOf('{') >= 0) {
+                return Result.deny("summoning with raw NBT ({...}) isn't allowed — it can spawn OP gear");
+            }
+            if (tokens.length >= 2) {
+                String entity = stripNamespace(tokens[1].toLowerCase(Locale.ROOT));
+                if (DANGEROUS_ENTITIES.contains(entity)) {
+                    return Result.deny("'" + entity + "' is a dangerous entity to summon");
+                }
             }
         }
 
@@ -139,6 +224,14 @@ public final class CommandGuard {
             }
         }
 
+        // /effect — block harmful effects and cap the amplifier.
+        if (verb.equals("effect")) {
+            Result effectResult = checkEffectCommand(tokens);
+            if (!effectResult.allowed()) {
+                return effectResult;
+            }
+        }
+
         // /enchant <target> <enchant> [level] — enforce vanilla caps.
         if (verb.equals("enchant")) {
             Result enchantResult = checkEnchantCommand(tokens);
@@ -159,6 +252,88 @@ public final class CommandGuard {
             }
         }
 
+        // The explicit target argument (where the verb has one) must be the wisher.
+        if (wisher != null) {
+            Result targetResult = checkTarget(verb, tokens, wisher);
+            if (!targetResult.allowed()) {
+                return targetResult;
+            }
+        }
+
+        return Result.ok();
+    }
+
+    /**
+     * For verbs that name a player target, require that target to be the wisher.
+     * Returns ok() for verbs with no player target (time/weather/summon/...).
+     */
+    private Result checkTarget(String verb, String[] tokens, String wisher) {
+        int idx = targetIndex(verb, tokens);
+        if (idx < 0 || idx >= tokens.length) {
+            return Result.ok();
+        }
+        String target = tokens[idx];
+        if (target.isEmpty()) {
+            return Result.ok();
+        }
+        if (!target.equalsIgnoreCase(wisher)) {
+            return Result.deny("this command would act on '" + target + "', but you may only act on "
+                    + wisher + " — name them as the target");
+        }
+        return Result.ok();
+    }
+
+    /** Token index of the player-target argument for a verb, or -1 if it has none. */
+    private static int targetIndex(String verb, String[] tokens) {
+        switch (verb) {
+            case "give":
+            case "enchant":
+                return 1;
+            case "xp":
+            case "experience":
+                // xp <add|set|query> <target> ...
+                return tokens.length > 2 ? 2 : -1;
+            case "effect":
+                // effect <give|clear> <target> ...
+                return tokens.length > 2 ? 2 : -1;
+            case "playsound":
+                // playsound <sound> <source> <target> ...
+                return tokens.length > 3 ? 3 : -1;
+            case "data":
+                // data get entity <target>
+                return tokens.length > 3 && tokens[1].equalsIgnoreCase("get")
+                        && tokens[2].equalsIgnoreCase("entity") ? 3 : -1;
+            case "item":
+                // item <replace|modify> entity <target> ...
+                return tokens.length > 3 && tokens[2].equalsIgnoreCase("entity") ? 3 : -1;
+            default:
+                return -1;
+        }
+    }
+
+    private Result checkEffectCommand(String[] tokens) {
+        // effect give <target> <effect> [seconds] [amplifier] [hideParticles]
+        // effect clear ... — always fine.
+        if (tokens.length < 2 || !tokens[1].equalsIgnoreCase("give")) {
+            return Result.ok();
+        }
+        if (tokens.length < 4) {
+            return Result.ok();
+        }
+        String effect = stripNamespace(tokens[3].toLowerCase(Locale.ROOT));
+        if (HARMFUL_EFFECTS.contains(effect)) {
+            return Result.deny("the '" + effect + "' effect harms players and isn't allowed");
+        }
+        if (tokens.length >= 6) {
+            try {
+                int amplifier = Integer.parseInt(tokens[5]);
+                if (amplifier > MAX_EFFECT_AMPLIFIER) {
+                    return Result.deny("effect amplifier " + amplifier + " is too high (max " + MAX_EFFECT_AMPLIFIER + ")");
+                }
+            } catch (NumberFormatException ignored) {
+                // non-numeric amplifier — let the server reject it
+            }
+        }
         return Result.ok();
     }
 

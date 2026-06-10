@@ -12,6 +12,7 @@ import dev.clxud.poke.PokeGenie;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -20,7 +21,10 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 /**
@@ -35,22 +39,51 @@ public final class McpServer {
 
     private static final String PROTOCOL_VERSION = "2024-11-05";
     private static final int KEEPALIVE_SECONDS = 15;
+    // --- Resource limits (plaintext HTTP is exposed publicly; these bound abuse) ---
+    /** Largest request body we will buffer; anything bigger gets a 413. */
+    private static final int MAX_BODY_BYTES = 256 * 1024;
+    /** Cap on concurrent SSE streams, each of which parks a worker thread. */
+    private static final int MAX_SESSIONS = 8;
+    /** Hard ceiling on worker threads, so a connection flood can't exhaust the JVM. */
+    private static final int MAX_THREADS = 64;
+    /** Failed auths from one IP within {@link #AUTH_WINDOW_MS} before we 429 it. */
+    private static final int MAX_AUTH_FAILURES = 20;
+    private static final long AUTH_WINDOW_MS = 60_000L;
+    /** Seconds the server waits to receive a full request before dropping it (anti-slowloris). */
+    private static final String MAX_REQ_TIME_SECONDS = "30";
 
     private final HttpServer server;
     private final ExecutorService pool;
     private final String apiKey;
     private final String serverVersion;
     private final PokeGenie genie;
+    private final SecurityPolicy policy;
+    /** When true, an authenticated request from an unknown IP is learned, not rejected. */
+    private final boolean learnCallers;
+    /** Notified with each newly learned caller IP so it can be persisted (may be null). */
+    private final Consumer<InetAddress> onLearned;
+    private final AuthThrottle throttle = new AuthThrottle(MAX_AUTH_FAILURES, AUTH_WINDOW_MS);
     private final Logger logger;
     private final Map<String, SseSession> sessions = new ConcurrentHashMap<>();
 
-    public McpServer(String bind, int port, String apiKey, String serverVersion, PokeGenie genie, Logger logger)
-            throws IOException {
+    public McpServer(String bind, int port, String apiKey, String serverVersion, PokeGenie genie,
+                     SecurityPolicy policy, boolean learnCallers, Consumer<InetAddress> onLearned,
+                     Logger logger) throws IOException {
         this.apiKey = apiKey;
         this.serverVersion = serverVersion;
         this.genie = genie;
+        this.policy = policy;
+        this.learnCallers = learnCallers;
+        this.onLearned = onLearned;
         this.logger = logger;
-        this.pool = Executors.newCachedThreadPool(r -> {
+        // Bound how long a client may take to send its request, closing slow-loris
+        // connections. This is a JVM-wide knob for the built-in HTTP server; only set
+        // it if the operator (or another component) hasn't already chosen a value.
+        if (System.getProperty("sun.net.httpserver.maxReqTime") == null) {
+            System.setProperty("sun.net.httpserver.maxReqTime", MAX_REQ_TIME_SECONDS);
+        }
+        this.pool = new ThreadPoolExecutor(2, MAX_THREADS, 60L, TimeUnit.SECONDS,
+                new SynchronousQueue<>(), r -> {
             Thread t = new Thread(r, "PokeMC-MCP");
             t.setDaemon(true);
             return t;
@@ -89,8 +122,12 @@ public final class McpServer {
             respond(ex, 405, "text/plain", "Method Not Allowed");
             return;
         }
-        if (!authorized(ex)) {
-            respond(ex, 401, "text/plain", "Unauthorized");
+        if (!gate(ex)) {
+            return;
+        }
+        if (sessions.size() >= MAX_SESSIONS) {
+            logger.warning("MCP refused new SSE stream: " + MAX_SESSIONS + " already open.");
+            respond(ex, 503, "text/plain", "Too many open streams");
             return;
         }
         String sessionId = UUID.randomUUID().toString();
@@ -124,17 +161,23 @@ public final class McpServer {
             respond(ex, 405, "text/plain", "Method Not Allowed");
             return;
         }
-        if (!authorized(ex)) {
-            respond(ex, 401, "text/plain", "Unauthorized");
+        if (!gate(ex)) {
             return;
         }
         String sessionId = queryParam(ex.getRequestURI().getRawQuery(), "sessionId");
         logger.info("MCP POST /messages from " + ex.getRemoteAddress() + " (session " + sessionId + ")");
         SseSession session = sessionId == null ? null : sessions.get(sessionId);
 
+        String body;
+        try {
+            body = readBody(ex);
+        } catch (RequestTooLargeException e) {
+            respond(ex, 413, "text/plain", "Payload Too Large");
+            return;
+        }
         List<JsonObject> requests;
         try {
-            requests = asObjects(JsonParser.parseString(readBody(ex)));
+            requests = asObjects(JsonParser.parseString(body));
         } catch (Exception e) {
             respond(ex, 400, "text/plain", "Bad JSON-RPC payload");
             return;
@@ -164,14 +207,20 @@ public final class McpServer {
             respond(ex, 405, "text/plain", "Method Not Allowed");
             return;
         }
-        if (!authorized(ex)) {
-            respond(ex, 401, "text/plain", "Unauthorized");
+        if (!gate(ex)) {
             return;
         }
         logger.info("MCP POST /mcp from " + ex.getRemoteAddress());
+        String body;
+        try {
+            body = readBody(ex);
+        } catch (RequestTooLargeException e) {
+            respond(ex, 413, "text/plain", "Payload Too Large");
+            return;
+        }
         JsonElement parsed;
         try {
-            parsed = JsonParser.parseString(readBody(ex));
+            parsed = JsonParser.parseString(body);
         } catch (Exception e) {
             respond(ex, 400, "text/plain", "Bad JSON-RPC payload");
             return;
@@ -241,26 +290,41 @@ public final class McpServer {
     }
 
     private JsonObject toolsListResult() {
+        // Hide any tool the policy disables (read-only / allowlist) so the model
+        // never even sees it offered.
+        JsonArray filtered = new JsonArray();
+        for (JsonElement t : ToolCatalog.tools()) {
+            if (t.isJsonObject() && policy.toolAllowed(optString(t.getAsJsonObject(), "name"))) {
+                filtered.add(t);
+            }
+        }
         JsonObject r = new JsonObject();
-        r.add("tools", ToolCatalog.tools());
+        r.add("tools", filtered);
         return r;
     }
 
     private JsonObject toolsCallResult(JsonObject params) {
         String name = params == null ? null : optString(params, "name");
+        if (!policy.toolAllowed(name)) {
+            logger.warning("MCP refused disabled tool '" + name + "' (blocked by security policy).");
+            return contentResult("Tool '" + name + "' is disabled by this server's MCP policy.", true);
+        }
         JsonObject args = params != null && params.has("arguments") && params.get("arguments").isJsonObject()
                 ? params.getAsJsonObject("arguments")
                 : new JsonObject();
         String text = genie.dispatchTool(name, args);
+        return contentResult(text == null ? "" : text, false);
+    }
 
+    private static JsonObject contentResult(String text, boolean isError) {
         JsonObject content = new JsonObject();
         content.addProperty("type", "text");
-        content.addProperty("text", text == null ? "" : text);
+        content.addProperty("text", text);
         JsonArray contentArr = new JsonArray();
         contentArr.add(content);
         JsonObject r = new JsonObject();
         r.add("content", contentArr);
-        r.addProperty("isError", false);
+        r.addProperty("isError", isError);
         return r;
     }
 
@@ -287,12 +351,54 @@ public final class McpServer {
 
     // ---- low-level HTTP helpers -------------------------------------------
 
+    /**
+     * Single entry gate for authenticated routes: source-IP allowlist, then a
+     * per-IP failed-auth throttle, then the bearer key. Responds with the right
+     * status and returns false when the request must be rejected.
+     */
+    private boolean gate(HttpExchange ex) throws IOException {
+        InetAddress addr = clientAddr(ex);
+        boolean ipOk = policy.ipAllowed(addr);
+        // An unknown IP is rejected outright only when we are NOT learning callers.
+        // When learning, we defer to the bearer key and learn the IP on success.
+        if (!ipOk && !learnCallers) {
+            logger.warning("MCP rejected request from disallowed IP " + (addr == null ? "?" : addr.getHostAddress()));
+            respond(ex, 403, "text/plain", "Forbidden");
+            return false;
+        }
+        String ip = addr == null ? null : addr.getHostAddress();
+        if (throttle.blocked(ip)) {
+            respond(ex, 429, "text/plain", "Too Many Requests");
+            return false;
+        }
+        if (!authorized(ex)) {
+            throttle.fail(ip);
+            respond(ex, 401, "text/plain", "Unauthorized");
+            return false;
+        }
+        throttle.ok(ip);
+        // Trust-on-first-use: a valid key from a new IP (e.g. Poke's first callback)
+        // teaches us that IP. policy.addAllowed dedupes; persist only genuinely new ones.
+        if (!ipOk && policy.addAllowed(addr)) {
+            logger.info("Learned authorized caller IP " + ip + " and added it to the MCP allowlist.");
+            if (onLearned != null) {
+                onLearned.accept(addr);
+            }
+        }
+        return true;
+    }
+
     private boolean authorized(HttpExchange ex) {
         String header = ex.getRequestHeaders().getFirst("Authorization");
         if (header == null) {
             return false;
         }
         return constantTimeEquals(header.trim(), "Bearer " + apiKey);
+    }
+
+    private static InetAddress clientAddr(HttpExchange ex) {
+        InetSocketAddress sa = ex.getRemoteAddress();
+        return sa == null ? null : sa.getAddress();
     }
 
     private static boolean constantTimeEquals(String a, String b) {
@@ -308,10 +414,19 @@ public final class McpServer {
         return diff == 0;
     }
 
+    /** Reads the body but refuses to buffer more than {@link #MAX_BODY_BYTES}. */
     private static String readBody(HttpExchange ex) throws IOException {
         try (InputStream in = ex.getRequestBody()) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            byte[] buf = in.readNBytes(MAX_BODY_BYTES + 1);
+            if (buf.length > MAX_BODY_BYTES) {
+                throw new RequestTooLargeException();
+            }
+            return new String(buf, StandardCharsets.UTF_8);
         }
+    }
+
+    /** Thrown by {@link #readBody} when a client sends an over-large payload. */
+    private static final class RequestTooLargeException extends IOException {
     }
 
     private static void respond(HttpExchange ex, int status, String contentType, String body) throws IOException {
@@ -363,6 +478,61 @@ public final class McpServer {
         }
         JsonElement el = obj.get(key);
         return el.isJsonPrimitive() ? el.getAsString() : el.toString();
+    }
+
+    /**
+     * Per-IP failed-auth counter. A real client never trips it; it only slows
+     * brute-force / probing and caps the log-spam from a flood of bad keys.
+     */
+    private static final class AuthThrottle {
+        private final int maxFailures;
+        private final long windowMs;
+        // ip -> [failure count, window start millis]
+        private final Map<String, long[]> hits = new ConcurrentHashMap<>();
+
+        AuthThrottle(int maxFailures, long windowMs) {
+            this.maxFailures = maxFailures;
+            this.windowMs = windowMs;
+        }
+
+        boolean blocked(String ip) {
+            if (ip == null) {
+                return false;
+            }
+            long[] h = hits.get(ip);
+            if (h == null) {
+                return false;
+            }
+            if (System.currentTimeMillis() - h[1] > windowMs) {
+                hits.remove(ip);
+                return false;
+            }
+            return h[0] >= maxFailures;
+        }
+
+        void fail(String ip) {
+            if (ip == null) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            hits.compute(ip, (k, h) -> {
+                if (h == null || now - h[1] > windowMs) {
+                    return new long[] {1, now};
+                }
+                h[0]++;
+                return h;
+            });
+            // A completed TCP request can't spoof its source IP, but guard the map anyway.
+            if (hits.size() > 10_000) {
+                hits.clear();
+            }
+        }
+
+        void ok(String ip) {
+            if (ip != null) {
+                hits.remove(ip);
+            }
+        }
     }
 
     /** One SSE response stream; writes are synchronized so frames never interleave. */
